@@ -3,7 +3,7 @@
  */
 
 metadata {
-    definition(name: "Third Reality Soil Moisture Sensor Custom", namespace: "custom", author: "Kyle") {
+    definition(name: "Third Reality Soil Moisture Sensor Custom", namespace: "custom", author: "Kyle", importUrl: "https://raw.githubusercontent.com/Kyleinator03/hubitat-third-reality-soil-sensor/main/third-reality-soil-sensor-custom.groovy") {
         attribute "permanentWiltingPoint", "number"
         capability "Configuration"
         capability "Refresh"
@@ -94,7 +94,7 @@ def updateHistory() {
         }
     }
 
-    int capacity = settings.fieldCapacity != null ? settings.fieldCapacity.toInteger() : 77
+    int capacity = settings.fieldCapacity != null ? settings.fieldCapacity.toInteger() : 75
     boolean isFcOutlier = (!isSpeedOutlier && rawMoist > capacity)
 
     // Build the status string and log exactly once per hour
@@ -132,10 +132,10 @@ def updatePlantCard(boolean isHourlyCron = false) {
     
     // Preferences & Offset
     int offset = settings.moistOffset != null ? settings.moistOffset.toInteger() : 0
-    int threshold = settings.permanentWiltingPoint != null ? settings.permanentWiltingPoint.toInteger() : 10
-    int capacity = settings.fieldCapacity != null ? settings.fieldCapacity.toInteger() : 77
-    int waterTarget = settings.wateringThreshold != null ? settings.wateringThreshold.toInteger() : 30
-    int maxDays = settings.maxDaysLimit != null ? settings.maxDaysLimit.toInteger() : 21
+    int threshold = settings.permanentWiltingPoint != null ? settings.permanentWiltingPoint.toInteger() : 30
+    int capacity = settings.fieldCapacity != null ? settings.fieldCapacity.toInteger() : 75
+    int waterTarget = settings.wateringThreshold != null ? settings.wateringThreshold.toInteger() : 50
+    int maxDays = settings.maxDaysLimit != null ? settings.maxDaysLimit.toInteger() : 14
 
     long now = new Date().getTime()
     if (state.history == null) state.history = [[time: now, rawMoisture: rawMoist, statusText: "Success", isSpeedOutlier: false, isFcOutlier: false]]
@@ -240,29 +240,28 @@ def updatePlantCard(boolean isHourlyCron = false) {
     sendEvent(name: "daysRemaining", value: daysLeft, unit: "days")
 
     // UI Variables required by the HTML string...
+    // Styling lives in dashboard CSS to keep plantCard under the 1024-char tile limit
     String cleanName = device.displayName.replace(" Soil Sensor", "").replace(" Moisture Sensor", "")
     String batt = battVal.toString()
     String battClass = battVal <= 20 ? "batt-low" : ""
     int battWidth = battVal
     boolean isDry = moist <= waterTarget
-    String alertClass = isDry ? "is-dry" : ""
-    String topLabelHtml = ""
+    String stateClass = ""
     String centerBig = daysLeft
     String centerSmall = "DAYS LEFT"
 
     if (isDry) {
         // Replaces the word "DRY" with the terracotta SVG water drop
-        centerBig = """<svg width="32" height="32" viewBox="0 0 24 24" fill="currentColor" style="margin-bottom: 2px;"><path d="M12 20a6 6 0 0 1-6-6c0-4 6-10.75 6-10.75S18 10 18 14a6 6 0 0 1-6 6z"/></svg>"""
+        stateClass = "is-dry"
+        centerBig = """<svg width="32" height="32" viewBox="0 0 24 24" fill="currentColor"><path d="M12 20a6 6 0 0 1-6-6c0-4 6-10.75 6-10.75S18 10 18 14a6 6 0 0 1-6 6z"/></svg>"""
         centerSmall = "WATER NOW"
     } else if (daysLeft == "--" || daysLeft == "0.0") {
+        stateClass = "is-calc"
         centerBig = "CALC"
         centerSmall = "GATHERING DATA"
-        daysLeft = "CALC"
     }
 
-    // Generate the dashboard Plant Card with full embedded dashboard CSS
-    // Generate the dashboard Plant Card with full embedded dashboard CSS
-    String cardHtml = """<div class="pw-wrap ${alertClass}"><div class="pw-head"><a href="/device/edit/${device.id}" target="_blank" class="pw-title" style="text-decoration:none;" title="Click to edit threshold">${cleanName}</a><div class="pw-batt ${battClass}"><div class="pw-b-icon"><div class="pw-b-fill" style="width:${battWidth}%;"></div></div><div class="pw-b-txt">${batt}%</div></div></div><div class="pw-hero"><div class="pw-ring" style="--val:${displayPct};"><div class="pw-ring-in">${topLabelHtml}<div class="pw-val" style="font-size: ${daysLeft == 'CALC' || isDry ? '1.2rem' : '1.7rem'};">${centerBig}</div><div class="pw-pct" style="font-size: 0.5rem; font-weight: 700; color: #64748b; letter-spacing: 1px; margin-top: 2px;">${centerSmall}</div></div></div></div><div class="pw-foot"><div class="pw-metrics"><span class="pw-temp">💧 ${moist}%</span><span class="pw-temp">🌡 ${temp}°F</span></div></div></div>"""
+    String cardHtml = """<div class="pw-wrap ${stateClass}"><div class="pw-head"><a href="/device/edit/${device.id}" target="_blank" class="pw-title" title="Click to edit threshold">${cleanName}</a><div class="pw-batt ${battClass}"><div class="pw-b-icon"><div class="pw-b-fill" style="width:${battWidth}%;"></div></div><div class="pw-b-txt">${batt}%</div></div></div><div class="pw-hero"><div class="pw-ring" style="--val:${displayPct};"><div class="pw-ring-in"><div class="pw-val">${centerBig}</div><div class="pw-pct">${centerSmall}</div></div></div></div><div class="pw-foot"><div class="pw-metrics"><span class="pw-temp">💧 ${moist}%</span><span class="pw-temp">🌡 ${temp}°F</span></div></div></div>"""
     sendEvent(name: "plantCard", value: cardHtml)
 
     // Generate a readable HTML table for the device page (Now 3 columns)
@@ -280,32 +279,9 @@ def updatePlantCard(boolean isHourlyCron = false) {
     sendEvent(name: "historyTable", value: tableHtml)
 }
 
-def calibrateMoisture(rawValue) {
-    // Fetch user settings, fallback to defaults if null
-    BigDecimal r1 = (settings?.calibRaw1 != null) ? settings.calibRaw1 as BigDecimal : 55.0
-    BigDecimal t1 = (settings?.calibTarget1 != null) ? settings.calibTarget1 as BigDecimal : 20.0
-    BigDecimal r2 = (settings?.calibRaw2 != null) ? settings.calibRaw2 as BigDecimal : 97.0
-    BigDecimal t2 = (settings?.calibTarget2 != null) ? settings.calibTarget2 as BigDecimal : 100.0
-    BigDecimal raw = rawValue as BigDecimal
-
-    // Prevent divide by zero if raw calibration points are identical
-    if (r1 == r2) return raw.toInteger()
-
-    // Calculate percentage using two-point linear interpolation
-    BigDecimal calibrated = t1 + ((raw - r1) * (t2 - t1) / (r2 - r1))
-
-    // Clamp values between 0 and 100
-    if (calibrated < 0) calibrated = 0.0
-    if (calibrated > 100) calibrated = 100.0
-
-    // Return as a rounded integer
-    return Math.round(calibrated).toInteger()
-}
-
 def updated() {
     log.info "Preferences updated..."
     runEvery1Hour(updateHistory)
-    sendEvent(name: "dryThreshold", value: settings.dryThreshold)
     updatePlantCard() 
 }
 
