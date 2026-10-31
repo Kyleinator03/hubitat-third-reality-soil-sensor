@@ -51,6 +51,17 @@ A 1×1 tile works well on a grid of roughly 200 pixels per tile. The grid size i
 
 The last block in `dashboard.css` sets a dark page background to match the cards. Delete that block to keep your dashboard's own background.
 
+## Moving a sensor to a new plant
+
+The driver learns how fast each pot dries. When you move a sensor to a different plant or pot, clear what it learned:
+
+1. Put the sensor in the new pot first.
+2. On the device page, click **Reset Sensor**. Leave the option at **No** to keep your calibration settings, or pick **Yes** to put Field Capacity, Watering Threshold, Wilting Point, and both offsets back to their defaults.
+
+The reset clears the hourly history and the learned drying rate. The card shows **CALC** again until it has about five hours of new readings. The first new history point comes from the current reading, so move the sensor before resetting, not after. A new pot or soil mix usually needs recalibrating anyway (see step 2).
+
+Hubitat's own **Events** tab still lists the old readings. The driver can't delete those. Hubitat removes them over time.
+
 ## Notes
 
 - **Browser support.** The CSS uses the `:has()` selector to find Plant Card tiles. Current Chrome, Safari, Edge, and Firefox support it. Very old wall tablets may not, and the card will look unstyled there.

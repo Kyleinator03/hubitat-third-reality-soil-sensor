@@ -21,6 +21,8 @@ metadata {
         attribute "etRate", "number"
         attribute "historyTable", "string"
 
+        command "resetSensor", [[name: "Also reset calibration settings?", type: "ENUM", constraints: ["No", "Yes"], description: "Yes also restores Field Capacity, Watering Threshold, Wilting Point, and both offsets to their defaults"]]
+
         fingerprint profileId: "0104", inClusters: "0000,0001,0003,0402,0405", outClusters: "0019", manufacturer: "Third Reality, Inc", model: "3RSM0147Z", deviceJoinName: "Third Reality Soil Sensor"
         fingerprint profileId: "0104", inClusters: "0000,0001,0003,0402,0405", outClusters: "0019", manufacturer: "Third Reality, Inc", model: "3RSM0347Z", deviceJoinName: "Third Reality Soil Sensor Gen2"
     }
@@ -283,6 +285,24 @@ def updated() {
     log.info "Preferences updated..."
     runEvery1Hour(updateHistory)
     updatePlantCard() 
+}
+
+def resetSensor(String resetCalibration = "No") {
+    log.info "${device.displayName} reset: clearing history and learned ET rate"
+    state.remove("history")
+    state.remove("savedEtRate")
+
+    if (resetCalibration == "Yes") {
+        log.info "${device.displayName} reset: restoring calibration settings to defaults"
+        device.updateSetting("fieldCapacity", [value: 75, type: "number"])
+        device.updateSetting("wateringThreshold", [value: 50, type: "number"])
+        device.updateSetting("permanentWiltingPoint", [value: 30, type: "number"])
+        device.updateSetting("moistOffset", [value: 0, type: "number"])
+        device.updateSetting("tempOffset", [value: 0.0, type: "decimal"])
+    }
+
+    // Deferred so updatePlantCard sees the restored settings rather than this execution's cached copy
+    runIn(1, "updatePlantCard")
 }
 
 def refresh() {
