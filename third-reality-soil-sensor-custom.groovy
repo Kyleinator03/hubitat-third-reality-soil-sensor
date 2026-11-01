@@ -86,12 +86,16 @@ def updateHistory() {
     
     boolean isSpeedOutlier = false
     double drop = 0.0
+    double hours = 1.0
     String statusText = "Success"
 
     if (lastValidPoint != null) {
         drop = lastValidPoint.rawMoisture - rawMoist
-        // GUARDRAIL 2: Speed Limit (Flag impossible drops > 2.0 per hour)
-        if (drop > 2.0) {
+        // Floor at 1h so a rescheduled scan minutes after the last one doesn't inflate the rate
+        hours = Math.max(1.0d, (now - (lastValidPoint.time as long)) / 3600000.0d)
+        // Fast drops above Field Capacity are normal post-watering drainage
+        boolean draining = lastValidPoint.isFcOutlier ?: false
+        if (!draining && drop / hours > 2.0) {
             isSpeedOutlier = true
         }
     }
@@ -101,7 +105,7 @@ def updateHistory() {
 
     // Build the status string and log exactly once per hour
     if (isSpeedOutlier) {
-        statusText = "Rejected - Speed Limit hit (Diff: ${String.format('%.1f', drop)})"
+        statusText = "Rejected - Speed Limit hit (Diff: ${String.format('%.1f', drop)} over ${String.format('%.1f', hours)}h)"
         log.warn "${device.displayName} Hourly Scan -> ${statusText}"
     } else if (isFcOutlier) {
         statusText = "Rejected - ${rawMoist} Above set FC (${capacity})"
