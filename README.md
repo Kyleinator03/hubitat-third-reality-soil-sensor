@@ -62,8 +62,17 @@ The reset clears the hourly history and the learned drying rate. The card shows 
 
 Hubitat's own **Events** tab still lists the old readings. The driver can't delete those. Hubitat removes them over time.
 
+## Automations
+
+The device also acts as a contact sensor: **open** means the plant needs water (soil moisture is at or below the Watering Threshold), and **closed** means it's fine. Use it in Rule Machine, or expose it to Alexa or HomeKit as a "needs water" signal.
+
+## Updating the driver
+
+After importing a new version, click **Configure** on each device page. This applies any new reporting settings, such as the battery percentage.
+
 ## Notes
 
+- **Missing sensor.** If the hub hears nothing from the sensor for over two hours, the hourly scan is skipped and a warning is logged. This keeps a dead battery or lost signal from looking like a plant that has stopped drying out.
 - **Browser support.** The CSS uses the `:has()` selector to find Plant Card tiles. Current Chrome, Safari, Edge, and Firefox support it. Very old wall tablets may not, and the card will look unstyled there.
 - **Card title.** The title is the device name, minus a trailing "Soil Sensor" or "Moisture Sensor". Clicking it opens the device page. That link only works on your local network, not through a cloud dashboard link.
 - **History table.** The device page has a `historyTable` attribute showing the last three days of hourly readings. It's too long for a dashboard tile.

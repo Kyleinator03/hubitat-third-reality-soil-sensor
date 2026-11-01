@@ -4,7 +4,6 @@
 
 metadata {
     definition(name: "Third Reality Soil Moisture Sensor Custom", namespace: "custom", author: "Kyle", importUrl: "https://raw.githubusercontent.com/Kyleinator03/hubitat-third-reality-soil-sensor/main/third-reality-soil-sensor-custom.groovy") {
-        attribute "permanentWiltingPoint", "number"
         capability "Configuration"
         capability "Refresh"
         capability "Battery"
@@ -42,10 +41,11 @@ def installed() {
 }
 
 def parse(String description) {
-    Map map = [:]
+    state.lastReportAt = now()
     def descMap = zigbee.parseDescriptionAsMap(description)
-    
-    if (descMap?.clusterInt == 0x0405 && descMap?.attrInt == 0x0000) {
+    if (descMap?.value == null) return
+
+    if (descMap.clusterInt == 0x0405 && descMap.attrInt == 0x0000) {
         def rawVal = Integer.parseInt(descMap.value, 16) / 100.0
         
         // Simple Flat Offset Calibration
@@ -59,13 +59,24 @@ def parse(String description) {
         sendEvent(name: "humidity", value: calibratedMoisture, unit: "%")
         sendEvent(name: "soilMoisture", value: calibratedMoisture, unit: "%")
         updatePlantCard()
-    } else if (descMap?.clusterInt == 0x0402 && descMap?.attrInt == 0x0000) {
-        def rawTemp = Integer.parseInt(descMap.value, 16) / 100.0
+    } else if (descMap.clusterInt == 0x0402 && descMap.attrInt == 0x0000) {
+        int rawInt = Integer.parseInt(descMap.value, 16)
+        if (rawInt == 0x8000) return
+        if (rawInt > 0x7FFF) rawInt -= 0x10000
+        def rawTemp = rawInt / 100.0
         def fahrenheit = (rawTemp * 1.8) + 32 + (settings.tempOffset != null ? settings.tempOffset.toDouble() : 0.0)
         BigDecimal roundedF = new BigDecimal(fahrenheit).setScale(1, BigDecimal.ROUND_HALF_UP)
         sendEvent(name: "temperature", value: roundedF, unit: "°F")
         updatePlantCard()
-    } else if (descMap?.clusterInt == 0x0001 && descMap?.attrInt == 0x0020) {
+    } else if (descMap.clusterInt == 0x0001 && descMap.attrInt == 0x0021) {
+        int rawPct = Integer.parseInt(descMap.value, 16)
+        if (rawPct == 0xFF) return
+        state.reportsBatteryPct = true
+        int pct = Math.min(100, Math.max(0, Math.round(rawPct / 2.0).toInteger()))
+        sendEvent(name: "battery", value: pct, unit: "%")
+        updatePlantCard()
+    } else if (descMap.clusterInt == 0x0001 && descMap.attrInt == 0x0020) {
+        if (state.reportsBatteryPct) return
         def rawVolts = Integer.parseInt(descMap.value, 16) / 10.0
         int pct = Math.min(100, Math.max(0, Math.round((rawVolts - 1.0) / 0.5 * 100)))
         sendEvent(name: "battery", value: pct, unit: "%")
@@ -74,9 +85,17 @@ def parse(String description) {
 }
 
 def updateHistory() {
-    // Read rawMoisture instead of humidity for the unchangeable history log
-    def rawMoist = device.currentValue("rawMoisture") != null ? device.currentValue("rawMoisture").toDouble() : 0.0
     long now = new Date().getTime()
+    if (device.currentValue("rawMoisture") == null) {
+        log.info "${device.displayName} Hourly Scan -> Skipped, no moisture reading yet"
+        return
+    }
+    if (state.lastReportAt != null && now - (state.lastReportAt as long) > 7200000) {
+        log.warn "${device.displayName} Hourly Scan -> Skipped, nothing heard from the sensor in over 2 hours. Check the sensor's battery and signal."
+        return
+    }
+    // Read rawMoisture instead of humidity for the unchangeable history log
+    def rawMoist = device.currentValue("rawMoisture").toDouble()
 
     if (state.history == null) state.history = []
 
@@ -148,6 +167,7 @@ def updateHistory() {
 }
 
 def updatePlantCard(boolean isHourlyCron = false) {
+    boolean hasReading = device.currentValue("rawMoisture") != null
     int moist = device.currentValue("humidity") != null ? device.currentValue("humidity").toInteger() : 0
     def rawMoist = device.currentValue("rawMoisture") != null ? device.currentValue("rawMoisture").toDouble() : 0.0
     def temp = device.currentValue("temperature") != null ? device.currentValue("temperature") : "--"
@@ -161,13 +181,13 @@ def updatePlantCard(boolean isHourlyCron = false) {
     int maxDays = settings.maxDaysLimit != null ? settings.maxDaysLimit.toInteger() : 14
 
     long now = new Date().getTime()
-    if (state.history == null) state.history = [[time: now, rawMoisture: rawMoist, statusText: "Success", isSpeedOutlier: false, isFcOutlier: false]]
+    if (state.history == null) state.history = hasReading ? [[time: now, rawMoisture: rawMoist, statusText: "Success", isSpeedOutlier: false, isFcOutlier: false]] : []
 
     // Find the last valid point for watering detection (so speed glitches don't reset memory)
     def validHistory = state.history.findAll { !(it.isSpeedOutlier ?: false) }
-    def lastValidPoint = validHistory.size() > 0 ? validHistory[-1] : state.history[-1]
-    
-    if (rawMoist > (lastValidPoint.rawMoisture + 5)) {
+    def lastValidPoint = validHistory ? validHistory[-1] : (state.history ? state.history[-1] : null)
+
+    if (lastValidPoint != null && rawMoist > (lastValidPoint.rawMoisture + 5)) {
         log.info "${device.displayName} watered. Calculating previous ET rate and resetting memory."
 
         // FILTER: Check valid raw values against the calibrated capacity 
@@ -202,7 +222,9 @@ def updatePlantCard(boolean isHourlyCron = false) {
 
     // Visual ring gauge maps the distance between Wilting Point (empty) and Field Capacity (full)
     int displayPct = 0
-    if (rawMoist > threshold) {
+    if (capacity <= threshold) {
+        displayPct = rawMoist > threshold ? 100 : 0
+    } else if (rawMoist > threshold) {
         // Calculate percentage based on raw capacity instead of an arbitrary 100
         displayPct = Math.round(((rawMoist - threshold) / (capacity - threshold).toDouble()) * 100).toInteger()
         
@@ -245,7 +267,9 @@ def updatePlantCard(boolean isHourlyCron = false) {
     }
 
     // Calculate estimated days remaining before hitting the Watering Threshold (Gas Light)
-    if (dropPerDay > 0 && moist > waterTarget) {
+    if (!hasReading) {
+        daysLeft = "--"
+    } else if (dropPerDay > 0 && moist > waterTarget) {
         double days = (moist - waterTarget) / dropPerDay
         if (days > maxDays) {
             daysLeft = "> ${maxDays}"
@@ -268,7 +292,8 @@ def updatePlantCard(boolean isHourlyCron = false) {
     String batt = battVal.toString()
     String battClass = battVal <= 20 ? "batt-low" : ""
     int battWidth = battVal
-    boolean isDry = moist <= waterTarget
+    boolean isDry = hasReading && moist <= waterTarget
+    if (hasReading) sendEvent(name: "contact", value: isDry ? "open" : "closed")
     String stateClass = ""
     String centerBig = daysLeft
     String centerSmall = "DAYS LEFT"
@@ -304,6 +329,14 @@ def updatePlantCard(boolean isHourlyCron = false) {
 
 def updated() {
     log.info "Preferences updated..."
+    int fc = settings.fieldCapacity != null ? settings.fieldCapacity.toInteger() : 75
+    int wt = settings.wateringThreshold != null ? settings.wateringThreshold.toInteger() : 50
+    int pwp = settings.permanentWiltingPoint != null ? settings.permanentWiltingPoint.toInteger() : 30
+    if (pwp >= fc) {
+        log.warn "${device.displayName}: Permanent Wilting Point (${pwp}) must be below Field Capacity (${fc}). The ring gauge will only show full or empty until this is fixed."
+    } else if (wt <= pwp || wt >= fc) {
+        log.warn "${device.displayName}: Watering Threshold (${wt}) should be between Permanent Wilting Point (${pwp}) and Field Capacity (${fc})."
+    }
     runEvery1Hour(updateHistory)
     updatePlantCard() 
 }
@@ -329,12 +362,14 @@ def resetSensor(String resetCalibration = "No") {
 def refresh() {
     return zigbee.readAttribute(0x0405, 0x0000) + 
            zigbee.readAttribute(0x0402, 0x0000) + 
-           zigbee.readAttribute(0x0001, 0x0020)   
+           zigbee.readAttribute(0x0001, 0x0020) +
+           zigbee.readAttribute(0x0001, 0x0021)
 }
 
 def configure() {
     return zigbee.configureReporting(0x0405, 0x0000, 0x21, 10, 300, 100) + 
            zigbee.configureReporting(0x0402, 0x0000, 0x29, 10, 300, 50) +  
            zigbee.batteryConfig() +
+           zigbee.configureReporting(0x0001, 0x0021, 0x20, 30, 21600, 2) +
            refresh()
 }
