@@ -119,6 +119,23 @@ def updateHistory() {
         isFcOutlier: isFcOutlier
     ]
 
+    // A drop that holds steady for 5 scans is a real step change (sensor moved/bumped), not a glitch
+    if (isSpeedOutlier && state.history.size() >= 5) {
+        def recent = state.history[-5..-1]
+        def levels = recent*.rawMoisture
+        if (recent.every { it.isSpeedOutlier ?: false } && (levels.max() - levels.min()) <= 2.0) {
+            log.warn "${device.displayName} Hourly Scan -> 5 steady readings after a drop. Starting new baseline at ${rawMoist}"
+            state.history = recent.collect { entry ->
+                boolean fc = entry.rawMoisture > capacity
+                entry + [
+                    isSpeedOutlier: false,
+                    isFcOutlier: fc,
+                    statusText: (fc ? "Rejected - ${entry.rawMoisture} Above set FC (${capacity})" : "Accepted - New baseline after step change").toString()
+                ]
+            }
+        }
+    }
+
     long cutoff = now - 259200000 // 3 Days
     state.history = state.history.findAll { it.time >= cutoff }
 
