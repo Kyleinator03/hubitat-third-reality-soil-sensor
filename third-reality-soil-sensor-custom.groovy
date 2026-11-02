@@ -365,12 +365,12 @@ def logHistory() {
         log.info "${device.displayName} history is empty"
         return
     }
-    String rows = history.reverse().collect { entry ->
+    String rows = history.collect { entry ->
         boolean isBad = (entry.isSpeedOutlier ?: false) || (entry.isFcOutlier ?: false)
         String readableDate = new Date(entry.time as long).format("MM/dd h:mm a")
         "<tr${isBad ? " style='color:#d9534f'" : ""}><td>${readableDate}</td><td>${entry.rawMoisture}</td><td>${entry.statusText ?: 'Success'}</td></tr>"
     }.join()
-    log.info "${device.displayName} history, newest first:<table style='border-spacing:12px 0'><tr><th>Time</th><th>Raw</th><th>Status</th></tr>${rows}</table>"
+    log.info "${device.displayName} history, oldest first:<table style='border-spacing:12px 0'><tr><th>Time</th><th>Raw</th><th>Status</th></tr>${rows}</table>"
 }
 
 def updated() {
