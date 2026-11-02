@@ -23,7 +23,7 @@ The driver builds a **Plant Card** for Hubitat dashboards. The card shows a ring
 3. Pair the sensor through **Devices > Add Device > Zigbee**. If it's already paired, open the device and change its **Type** to *Third Reality Soil Moisture Sensor Custom*.
 4. On the device page, click **Save Preferences**, then **Configure**.
 
-Clicking **Save Preferences** matters even if you change nothing. It starts the hourly history scan that the days-left estimate depends on.
+**Configure** sets up the sensor's reporting and starts the hourly history scan that the days-left estimate depends on.
 
 ## 2. Calibrate the moisture settings
 
@@ -35,7 +35,7 @@ The ring and the days-left estimate use three moisture levels. Field Capacity an
 | **Watering Threshold** | The level where the plant should be watered. The card shows "WATER NOW" at or below it. | Read the raw moisture on a day when you'd normally water. |
 | **Permanent Wilting Point** | The level where the plant can no longer take up water. This is an empty ring. | Set it somewhat below the watering threshold. |
 
-**Max Days Limit** caps the days-left display when the soil is drying very slowly. **Moisture Offset** and **Temperature Offset** shift readings if your sensor reads high or low.
+**Max Days Limit** caps the days-left display when the soil is drying very slowly. **Moisture Offset** and **Temperature Offset** shift readings if your sensor reads high or low. Temperature follows your hub's Celsius or Fahrenheit setting, and the offset is in the same scale.
 
 The days-left estimate shows **CALC** until the driver has about five hours of history. After each watering, it averages the newest drying rate with past ones, so the estimate improves over time.
 
@@ -72,10 +72,10 @@ After importing a new version, click **Configure** on each device page. This app
 
 ## Notes
 
-- **Missing sensor.** If the hub hears nothing from the sensor for over two hours, the hourly scan is skipped and a warning is logged. This keeps a dead battery or lost signal from looking like a plant that has stopped drying out.
+- **Missing sensor.** If the hub hears nothing from the sensor for over two hours, the hourly scan is skipped and a warning is logged. This keeps a dead battery or lost signal from looking like a plant that has stopped drying out. The `healthStatus` attribute switches to `offline` at the same time and back to `online` on the next report, so you can get a Rule Machine notification about it.
 - **Browser support.** The CSS uses the `:has()` selector to find Plant Card tiles. Current Chrome, Safari, Edge, and Firefox support it. Very old wall tablets may not, and the card will look unstyled there.
 - **Card title.** The title is the device name, minus a trailing "Soil Sensor" or "Moisture Sensor". Clicking it opens the device page. That link only works on your local network, not through a cloud dashboard link.
-- **History table.** The device page has a `historyTable` attribute showing the last three days of hourly readings. It's too long for a dashboard tile.
+- **Troubleshooting.** Click **Log History** on the device page to write the last three days of hourly readings to **Logs** as a table, with rejected readings in red. Turn on **Enable debug logging** to log every hourly scan and drying-rate calculation as it happens. It turns itself off after 24 hours.
 - **Customizing the card.** Hubitat won't show tile values longer than 1,024 characters. The driver keeps the card HTML short and puts all static styling in the CSS. Keep it that way if you change the card.
 
 ## License
