@@ -27,15 +27,15 @@ The driver builds a **Plant Card** for Hubitat dashboards. The card shows a ring
 
 ## 2. Calibrate the moisture settings
 
-The ring and the days-left estimate use three moisture levels. Field Capacity and Wilting Point compare against the **raw moisture** reading on the device page. Watering Threshold compares against **soil moisture**, which is raw moisture plus any Moisture Offset. With no offset, the two are the same.
+The ring and the days-left estimate use three moisture levels, all compared against the sensor's moisture reading (**humidity** on the device page). If you have an analog moisture meter you trust, use it to pick these levels: the two devices measure differently and won't show the same numbers, but you can note what this sensor reads when your meter says the soil is wet or dry.
 
 | Setting | What it means | How to find it |
 |---|---|---|
-| **Field Capacity** | The wettest the soil stays after draining. This is a full ring. | Water the plant thoroughly, let it drain for about an hour, then read the raw moisture. |
-| **Watering Threshold** | The level where the plant should be watered. The card shows "WATER NOW" at or below it. | Read the raw moisture on a day when you'd normally water. |
+| **Field Capacity** | The wettest the soil stays after draining. This is a full ring. | Water the plant thoroughly, let it drain for about an hour, then read the moisture. |
+| **Watering Threshold** | The level where the plant should be watered. The card shows "WATER NOW" at or below it. | Read the moisture on a day when you'd normally water, or when your analog meter says the plant needs water. |
 | **Permanent Wilting Point** | The level where the plant can no longer take up water. This is an empty ring. | Set it somewhat below the watering threshold. |
 
-**Max Days Limit** caps the days-left display when the soil is drying very slowly. **Moisture Offset** and **Temperature Offset** shift readings if your sensor reads high or low. Temperature follows your hub's Celsius or Fahrenheit setting, and the offset is in the same scale.
+**Max Days Limit** caps the days-left display when the soil is drying very slowly. **Temperature Offset** shifts the temperature if your sensor reads high or low. Temperature follows your hub's Celsius or Fahrenheit setting, and the offset is in the same scale.
 
 The days-left estimate shows **CALC** until the driver has about five hours of history. After each watering, it averages the newest drying rate with past ones, so the estimate improves over time.
 
@@ -56,7 +56,7 @@ The last block in `dashboard.css` sets a dark page background to match the cards
 The driver learns how fast each pot dries. When you move a sensor to a different plant or pot, clear what it learned:
 
 1. Put the sensor in the new pot first.
-2. On the device page, click **Reset Sensor**. Leave the option at **No** to keep your calibration settings, or pick **Yes** to put Field Capacity, Watering Threshold, Wilting Point, and both offsets back to their defaults.
+2. On the device page, click **Reset Sensor**. Leave the option at **No** to keep your calibration settings, or pick **Yes** to put Field Capacity, Watering Threshold, Wilting Point, and the temperature offset back to their defaults.
 
 The reset clears the hourly history and the learned drying rate. The card shows **CALC** again until it has about five hours of new readings. The first new history point comes from the current reading, so move the sensor before resetting, not after. A new pot or soil mix usually needs recalibrating anyway (see step 2).
 
@@ -64,11 +64,11 @@ Hubitat's own **Events** tab still lists the old readings. The driver can't dele
 
 ## Automations
 
-The device also acts as a contact sensor: **open** means the plant needs water (soil moisture is at or below the Watering Threshold), and **closed** means it's fine. Use it in Rule Machine, or expose it to Alexa or HomeKit as a "needs water" signal.
+The device also acts as a contact sensor: **open** means the plant needs water (moisture is at or below the Watering Threshold), and **closed** means it's fine. Use it in Rule Machine, or expose it to Alexa or HomeKit as a "needs water" signal.
 
 ## Updating the driver
 
-After importing a new version, click **Configure** on each device page. This applies any new reporting settings, such as the battery percentage.
+After importing a new version, click **Save Preferences** and then **Configure** on each device page. Saving clears out settings and attributes that older versions used, and Configure applies any new reporting settings, such as the battery percentage.
 
 ## Notes
 

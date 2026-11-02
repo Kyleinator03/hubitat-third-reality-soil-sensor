@@ -9,7 +9,7 @@
 import groovy.transform.Field
 import java.math.RoundingMode
 
-@Field static final Map DEFAULTS = [fieldCapacity: 75, wateringThreshold: 50, permanentWiltingPoint: 30, maxDaysLimit: 14, moistOffset: 0, tempOffset: 0.0]
+@Field static final Map DEFAULTS = [fieldCapacity: 75, wateringThreshold: 50, permanentWiltingPoint: 30, maxDaysLimit: 14, tempOffset: 0.0]
 
 metadata {
     definition(name: "Third Reality Soil Moisture Sensor Custom", namespace: "kyleinator03", author: "Kyle", importUrl: "https://raw.githubusercontent.com/Kyleinator03/hubitat-third-reality-soil-sensor/main/third-reality-soil-sensor-custom.groovy") {
@@ -21,8 +21,6 @@ metadata {
         capability "Contact Sensor"
         capability "Sensor"
 
-        attribute "soilMoisture", "number"
-        attribute "rawMoisture", "number"
         attribute "waterRemaining", "number"
         attribute "daysRemaining", "string"
         attribute "plantCard", "string"
@@ -30,19 +28,18 @@ metadata {
         attribute "healthStatus", "enum", ["online", "offline"]
 
         command "logHistory"
-        command "resetSensor", [[name: "Also reset calibration settings?", type: "ENUM", constraints: ["No", "Yes"], description: "Yes also restores Field Capacity, Watering Threshold, Wilting Point, and both offsets to their defaults"]]
+        command "resetSensor", [[name: "Also reset calibration settings?", type: "ENUM", constraints: ["No", "Yes"], description: "Yes also restores Field Capacity, Watering Threshold, Wilting Point, and the temperature offset to their defaults"]]
 
         fingerprint profileId: "0104", inClusters: "0000,0001,0003,0402,0405", outClusters: "0019", manufacturer: "Third Reality, Inc", model: "3RSM0147Z", deviceJoinName: "Third Reality Soil Sensor"
         fingerprint profileId: "0104", inClusters: "0000,0001,0003,0402,0405", outClusters: "0019", manufacturer: "Third Reality, Inc", model: "3RSM0347Z", deviceJoinName: "Third Reality Soil Sensor Gen2"
     }
 
     preferences {
-        input name: "fieldCapacity", type: "number", title: "Field Capacity (Raw)", description: "The maximum amount of water the soil holds against gravity. Set this to the sensor's RAW moisture reading about an hour after a full soaking drain. (e.g., 72)", defaultValue: DEFAULTS.fieldCapacity, required: true
-        input name: "wateringThreshold", type: "number", title: "Watering Threshold (%)", description: "The raw moisture level where the plant actually needs to be watered. This triggers the 'WATER NOW' alert and is the target for the Days Left countdown. (e.g., 50)", defaultValue: DEFAULTS.wateringThreshold, required: true
+        input name: "fieldCapacity", type: "number", title: "Field Capacity (%)", description: "The maximum amount of water the soil holds against gravity. Set this to the sensor's moisture reading about an hour after a full soaking drain. (e.g., 72)", defaultValue: DEFAULTS.fieldCapacity, required: true
+        input name: "wateringThreshold", type: "number", title: "Watering Threshold (%)", description: "The moisture level where the plant actually needs to be watered. This triggers the 'WATER NOW' alert and is the target for the Days Left countdown. (e.g., 50)", defaultValue: DEFAULTS.wateringThreshold, required: true
         input name: "permanentWiltingPoint", type: "number", title: "Permanent Wilting Point (%)", description: "The absolute zero limit where the plant can no longer extract water. This sets the 0% visual empty state of the blue ring gauge. (e.g., 30)", defaultValue: DEFAULTS.permanentWiltingPoint, required: true
         input name: "maxDaysLimit", type: "number", title: "Max Days Limit", description: "The maximum days left to display when the plant is stable or drying extremely slowly. (e.g., 21)", defaultValue: DEFAULTS.maxDaysLimit, required: true
         input name: "tempOffset", type: "decimal", title: "Temperature Offset (°)", description: "In your hub's temperature scale.", defaultValue: DEFAULTS.tempOffset, required: false
-        input name: "moistOffset", type: "number", title: "Moisture Offset (%)", description: "Flat offset to adjust your raw moisture reading (e.g., -10).", defaultValue: DEFAULTS.moistOffset, required: false
         input name: "txtEnable", type: "bool", title: "Enable descriptionText logging", description: "Logs readings, waterings, and learned drying rates.", defaultValue: true
         input name: "logEnable", type: "bool", title: "Enable debug logging", description: "Logs every hourly scan and ET calculation. Turns itself off after 24 hours.", defaultValue: false
     }
@@ -83,16 +80,12 @@ def parse(String description) {
     if (descMap?.value == null) return
 
     if (descMap.clusterInt == 0x0405 && descMap.attrInt == 0x0000) {
-        def rawVal = Integer.parseInt(descMap.value, 16) / 100.0
-        int offset = pref("moistOffset").toInteger()
-        int calibratedMoisture = Math.min(100, Math.max(0, Math.round(rawVal + offset).toInteger()))
-        String desc = "${device.displayName} soil moisture is ${calibratedMoisture}%"
-        boolean changed = device.currentValue("soilMoisture") != calibratedMoisture
-
-        sendEvent(name: "rawMoisture", value: rawVal)
-        sendEvent(name: "humidity", value: calibratedMoisture, unit: "%", descriptionText: desc)
-        sendEvent(name: "soilMoisture", value: calibratedMoisture, unit: "%", descriptionText: desc)
-        if (changed) logInfo "soil moisture is ${calibratedMoisture}% (raw ${rawVal})"
+        def moisture = Integer.parseInt(descMap.value, 16) / 100.0
+        state.moisture = moisture
+        int rounded = Math.min(100, Math.max(0, Math.round(moisture).toInteger()))
+        boolean changed = device.currentValue("humidity") != rounded
+        sendEvent(name: "humidity", value: rounded, unit: "%", descriptionText: "${device.displayName} soil moisture is ${rounded}%")
+        if (changed) logInfo "soil moisture is ${rounded}% (${moisture})"
         updatePlantCard()
     } else if (descMap.clusterInt == 0x0402 && descMap.attrInt == 0x0000) {
         int rawInt = Integer.parseInt(descMap.value, 16)
@@ -128,7 +121,7 @@ private void sendBattery(int pct) {
 
 def updateHistory() {
     long now = new Date().getTime()
-    if (device.currentValue("rawMoisture") == null) {
+    if (state.moisture == null) {
         logDebug "Hourly Scan -> Skipped, no moisture reading yet"
         return
     }
@@ -141,8 +134,7 @@ def updateHistory() {
         }
         return
     }
-    // Read rawMoisture instead of humidity for the unchangeable history log
-    def rawMoist = device.currentValue("rawMoisture").toDouble()
+    def rawMoist = state.moisture.toDouble()
 
     if (state.history == null) state.history = []
 
@@ -214,9 +206,9 @@ def updateHistory() {
 }
 
 def updatePlantCard(boolean isHourlyCron = false) {
-    boolean hasReading = device.currentValue("rawMoisture") != null
+    boolean hasReading = state.moisture != null
     int moist = device.currentValue("humidity") != null ? device.currentValue("humidity").toInteger() : 0
-    def rawMoist = device.currentValue("rawMoisture") != null ? device.currentValue("rawMoisture").toDouble() : 0.0
+    double rawMoist = hasReading ? state.moisture.toDouble() : 0.0
     def temp = device.currentValue("temperature") != null ? device.currentValue("temperature") : "--"
     int battVal = device.currentValue("battery") != null ? device.currentValue("battery").toInteger() : 100
     
@@ -314,16 +306,16 @@ def updatePlantCard(boolean isHourlyCron = false) {
     // Calculate estimated days remaining before hitting the Watering Threshold (Gas Light)
     if (!hasReading) {
         daysLeft = "--"
-    } else if (dropPerDay > 0 && moist > waterTarget) {
-        double days = (moist - waterTarget) / dropPerDay
+    } else if (dropPerDay > 0 && rawMoist > waterTarget) {
+        double days = (rawMoist - waterTarget) / dropPerDay
         if (days > maxDays) {
             daysLeft = "> ${maxDays}"
         } else {
             daysLeft = String.format("%.1f", days)
         }
-    } else if (moist <= waterTarget) {
+    } else if (rawMoist <= waterTarget) {
         daysLeft = "0.0"
-    } else if (dropPerDay == 0.0 && moist > waterTarget && pointCount >= 5) {
+    } else if (dropPerDay == 0.0 && rawMoist > waterTarget && pointCount >= 5) {
         // Embrace the flatline: Plant is stable, no measurable drop
         daysLeft = "> ${maxDays}"
     }
@@ -338,7 +330,7 @@ def updatePlantCard(boolean isHourlyCron = false) {
     String batt = battVal.toString()
     String battClass = battVal <= 20 ? "batt-low" : ""
     int battWidth = battVal
-    boolean isDry = hasReading && moist <= waterTarget
+    boolean isDry = hasReading && rawMoist <= waterTarget
     if (hasReading) sendEvent(name: "contact", value: isDry ? "open" : "closed")
     String stateClass = ""
     String centerBig = daysLeft
@@ -370,7 +362,7 @@ def logHistory() {
         String readableDate = new Date(entry.time as long).format("MM/dd h:mm a")
         "<tr${isBad ? " style='color:#d9534f'" : ""}><td>${readableDate}</td><td>${entry.rawMoisture}</td><td>${entry.statusText ?: 'Success'}</td></tr>"
     }.join()
-    log.info "${device.displayName} history, oldest first:<table style='border-spacing:12px 0'><tr><th>Time</th><th>Raw</th><th>Status</th></tr>${rows}</table>"
+    log.info "${device.displayName} history, oldest first:<table style='border-spacing:12px 0'><tr><th>Time</th><th>Moisture</th><th>Status</th></tr>${rows}</table>"
 }
 
 def updated() {
@@ -383,7 +375,11 @@ def updated() {
     } else if (wt <= pwp || wt >= fc) {
         log.warn "${device.displayName}: Watering Threshold (${wt}) should be between Permanent Wilting Point (${pwp}) and Field Capacity (${fc})."
     }
-    device.deleteCurrentState("historyTable")
+    if (state.moisture == null && device.currentValue("rawMoisture") != null) {
+        state.moisture = device.currentValue("rawMoisture")
+    }
+    ["historyTable", "soilMoisture", "rawMoisture"].each { device.deleteCurrentState(it) }
+    device.removeSetting("moistOffset")
     scheduleHistory()
     if (logEnable) runIn(86400, "logsOff")
     updatePlantCard()
@@ -396,7 +392,7 @@ def resetSensor(String resetCalibration = "No") {
 
     if (resetCalibration == "Yes") {
         log.info "${device.displayName} reset: restoring calibration settings to defaults"
-        ["fieldCapacity", "wateringThreshold", "permanentWiltingPoint", "moistOffset"].each {
+        ["fieldCapacity", "wateringThreshold", "permanentWiltingPoint"].each {
             device.updateSetting(it, [value: DEFAULTS[it], type: "number"])
         }
         device.updateSetting("tempOffset", [value: DEFAULTS.tempOffset, type: "decimal"])
