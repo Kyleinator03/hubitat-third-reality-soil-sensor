@@ -1,7 +1,7 @@
 /**
  *  Third Reality Soil Moisture Sensor (with Smart Plant Card & ET Prediction)
  *
- *  Version: 1.2.0
+ *  Version: 1.3.0
  *  https://github.com/Kyleinator03/hubitat-third-reality-soil-sensor
  *  License: GPL-3.0
  */
@@ -136,6 +136,7 @@ def updateHistory() {
         } else {
             logDebug "Hourly Scan -> Skipped, sensor still offline"
         }
+        updatePlantCard()
         return
     }
     def rawMoist = state.moisture.toDouble()
@@ -402,14 +403,21 @@ def updatePlantCard(boolean isHourlyCron = false) {
     int battWidth = battVal
     boolean isDry = hasReading && rawMoist <= waterTarget
     if (hasReading) sendEvent(name: "contact", value: isDry ? "open" : "closed")
+    String updated = "--"
+    if (state.lastReportAt != null) {
+        Date seen = new Date(state.lastReportAt as long)
+        String fmt = seen.format("yyyyMMdd", location.timeZone) == new Date(now).format("yyyyMMdd", location.timeZone) ? "h:mm a" : "MM/dd h:mm a"
+        updated = seen.format(fmt, location.timeZone)
+    }
+    String staleClass = device.currentValue("healthStatus") == "offline" ? " is-stale" : ""
     String stateClass = ""
     String centerBig = daysLeft
     String centerSmall = "DAYS LEFT"
 
     if (isDry) {
-        // Replaces the word "DRY" with the terracotta SVG water drop
+        // The water drop icon is drawn by the dashboard CSS to save card characters
         stateClass = "is-dry"
-        centerBig = """<svg width="32" height="32" viewBox="0 0 24 24" fill="currentColor"><path d="M12 20a6 6 0 0 1-6-6c0-4 6-10.75 6-10.75S18 10 18 14a6 6 0 0 1-6 6z"/></svg>"""
+        centerBig = ""
         centerSmall = "WATER NOW"
     } else if (daysLeft == "--" || daysLeft == "0.0") {
         stateClass = "is-calc"
@@ -417,7 +425,7 @@ def updatePlantCard(boolean isHourlyCron = false) {
         centerSmall = "GATHERING DATA"
     }
 
-    String cardHtml = """<div class="pw-wrap ${stateClass}"><div class="pw-head"><a href="/device/edit/${device.id}" target="_blank" class="pw-title" title="Click to edit threshold">${cleanName}</a><div class="pw-batt ${battClass}"><div class="pw-b-icon"><div class="pw-b-fill" style="width:${battWidth}%;"></div></div><div class="pw-b-txt">${batt}%</div></div></div><div class="pw-hero"><div class="pw-ring" style="--val:${displayPct};"><div class="pw-ring-in"><div class="pw-val">${centerBig}</div><div class="pw-pct">${centerSmall}</div></div></div></div><div class="pw-foot"><div class="pw-metrics"><span class="pw-temp">💧 ${moist}%</span><span class="pw-temp">🌡 ${temp}°${location.temperatureScale}</span></div></div></div>"""
+    String cardHtml = """<div class="pw-wrap ${stateClass}${staleClass}"><div class="pw-head"><a href="/device/edit/${device.id}" target="_blank" class="pw-title" title="Click to edit threshold">${cleanName}</a><div class="pw-batt ${battClass}"><div class="pw-b-icon"><div class="pw-b-fill" style="width:${battWidth}%;"></div></div><div class="pw-b-txt">${batt}%</div></div></div><div class="pw-hero"><div class="pw-ring" style="--val:${displayPct};"><div class="pw-ring-in"><div class="pw-val">${centerBig}</div><div class="pw-pct">${centerSmall}</div></div></div></div><div class="pw-foot"><div class="pw-metrics"><span class="pw-temp">💧 ${moist}%</span><span class="pw-temp">🌡 ${temp}°${location.temperatureScale}</span></div></div><div class="pw-upd">Updated ${updated}</div></div>"""
     sendEvent(name: "plantCard", value: cardHtml)
 }
 
