@@ -32,14 +32,15 @@
 .pw-val { font-size: 1.7rem !important; font-weight: 700 !important; color: #f8fafc !important; line-height: 1 !important; letter-spacing: -1px !important; display: flex !important; align-items: baseline !important; }
 .pw-pct { display: block !important; font-size: 0.5rem !important; font-weight: 700 !important; color: #64748b !important; letter-spacing: 1px !important; margin-top: 2px !important; }
 .pw-wrap.is-dry .pw-val, .pw-wrap.is-calc .pw-val { font-size: 1.2rem !important; }
-.pw-val svg { margin-bottom: 2px !important; }
+.pw-wrap.is-dry .pw-val::before { content: '' !important; width: 32px !important; height: 32px !important; margin-bottom: 2px !important; background: currentColor !important; -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 20a6 6 0 0 1-6-6c0-4 6-10.75 6-10.75S18 10 18 14a6 6 0 0 1-6 6z'/%3E%3C/svg%3E") center / contain no-repeat !important; mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 20a6 6 0 0 1-6-6c0-4 6-10.75 6-10.75S18 10 18 14a6 6 0 0 1-6 6z'/%3E%3C/svg%3E") center / contain no-repeat !important; }
 
 /* Footer Pill - Vertically Stacked with Split Metrics */
-.pw-foot { display: flex !important; flex-direction: column !important; justify-content: center !important; align-items: stretch !important; gap: 4px !important; background: rgba(255,255,255,0.03) !important; padding: 8px 12px !important; border-radius: 12px !important; border: 1px solid rgba(255,255,255,0.04) !important; margin: 0 14px 14px 14px !important; box-sizing: border-box !important; transition: all 0.3s ease !important; }
+.pw-foot { display: flex !important; flex-direction: column !important; justify-content: center !important; align-items: stretch !important; gap: 4px !important; background: rgba(255,255,255,0.03) !important; padding: 8px 12px !important; border-radius: 12px !important; border: 1px solid rgba(255,255,255,0.04) !important; margin: 0 14px 4px 14px !important; box-sizing: border-box !important; transition: all 0.3s ease !important; }
 .pw-metrics { display: flex !important; justify-content: space-between !important; align-items: center !important; width: 100% !important; }
 .pw-status { display: flex !important; justify-content: center !important; align-items: center !important; }
 .pw-stat-txt { font-size: 0.65rem !important; font-weight: 700 !important; letter-spacing: 0.5px !important; color: #cbd5e1 !important; text-align: center !important; }
 .pw-temp { font-size: 0.75rem !important; font-weight: 600 !important; color: #94a3b8 !important; }
+.pw-upd { font-size: 0.55rem !important; font-weight: 600 !important; color: #64748b !important; text-align: center !important; letter-spacing: 0.3px !important; font-variant-numeric: tabular-nums !important; padding-bottom: 1px !important; }
 
 /* Alerts & Statuses */
 
@@ -68,6 +69,11 @@
 .pw-wrap.is-crit .pw-val { color: #ef4444 !important; }
 .pw-wrap.is-crit .pw-foot { background: rgba(239, 68, 68, 0.08) !important; border: 1px solid rgba(239, 68, 68, 0.25) !important; }
 .pw-wrap.is-crit .pw-stat-txt { color: #ef4444 !important; }
+
+/* 3. "Stale" - nothing heard from the sensor in over 2 hours. Dims the card and highlights the last-updated time */
+.pw-wrap.is-stale .pw-head, .pw-wrap.is-stale .pw-hero, .pw-wrap.is-stale .pw-foot { opacity: 0.4 !important; filter: grayscale(1) !important; }
+.pw-wrap.is-stale .pw-ring { animation: none !important; }
+.pw-wrap.is-stale .pw-upd { color: #f59e0b !important; }
 
 /* Optional: dark page background to match the cards. Delete this block to keep your dashboard's own background. */
 body { background-color: #0b0d11 !important; }

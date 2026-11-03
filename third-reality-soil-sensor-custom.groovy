@@ -1,7 +1,7 @@
 /**
  *  Third Reality Soil Moisture Sensor (with Smart Plant Card & ET Prediction)
  *
- *  Version: 1.1.0
+ *  Version: 1.3.0
  *  https://github.com/Kyleinator03/hubitat-third-reality-soil-sensor
  *  License: GPL-3.0
  */
@@ -10,6 +10,8 @@ import groovy.transform.Field
 import java.math.RoundingMode
 
 @Field static final Map DEFAULTS = [fieldCapacity: 75, wateringThreshold: 50, permanentWiltingPoint: 30, maxDaysLimit: 14, tempOffset: 0.0]
+@Field static final Map DRAIN = [windowMs: 1800000L, endRatePerHr: 1.0, maxMs: 21600000L, soakMinDrop: 2.0, fcSamplesKept: 5]
+@Field static final Map ET = [minPoints: 5, gapMs: 10800000L, blendMs: 86400000L, minCycleMs: 43200000L, maxSavedDays: 7.0]
 
 metadata {
     definition(name: "Third Reality Soil Moisture Sensor Custom", namespace: "kyleinator03", author: "Kyle", importUrl: "https://raw.githubusercontent.com/Kyleinator03/hubitat-third-reality-soil-sensor/main/third-reality-soil-sensor-custom.groovy") {
@@ -26,6 +28,8 @@ metadata {
         attribute "plantCard", "string"
         attribute "etRate", "number"
         attribute "healthStatus", "enum", ["online", "offline"]
+        attribute "learnedFieldCapacity", "number"
+        attribute "debugFcSampleCount", "number"
 
         command "logHistory"
         command "resetSensor", [[name: "Also reset calibration settings?", type: "ENUM", constraints: ["No", "Yes"], description: "Yes also restores Field Capacity, Watering Threshold, Wilting Point, and the temperature offset to their defaults"]]
@@ -86,6 +90,7 @@ def parse(String description) {
         boolean changed = device.currentValue("humidity") != rounded
         sendEvent(name: "humidity", value: rounded, unit: "%", descriptionText: "${device.displayName} soil moisture is ${rounded}%")
         if (changed) logInfo "soil moisture is ${rounded}% (${moisture})"
+        if (state.drainSamples != null) trackDrainage(moisture as double, now())
         updatePlantCard()
     } else if (descMap.clusterInt == 0x0402 && descMap.attrInt == 0x0000) {
         int rawInt = Integer.parseInt(descMap.value, 16)
@@ -132,16 +137,28 @@ def updateHistory() {
         } else {
             logDebug "Hourly Scan -> Skipped, sensor still offline"
         }
+        updatePlantCard()
         return
     }
     def rawMoist = state.moisture.toDouble()
 
     if (state.history == null) state.history = []
 
-    // Look back to find the last point that wasn't a speed outlier so math compares correctly
-    def validHistory = state.history.findAll { !(it.isSpeedOutlier ?: false) }
+    if (state.drainSamples != null) {
+        if (now - (state.wateredAt as long) >= DRAIN.maxMs) {
+            finishDrainage(rawMoist, now)
+        } else {
+            state.history << [time: now, rawMoisture: rawMoist, statusText: "Draining", isSpeedOutlier: false, isDraining: true]
+            logDebug "Hourly Scan -> Draining (${rawMoist})"
+        }
+        trimHistory(now)
+        updatePlantCard(true)
+        return
+    }
+
+    def validHistory = validPoints()
     def lastValidPoint = validHistory.size() > 0 ? validHistory[-1] : null
-    
+
     boolean isSpeedOutlier = false
     double drop = 0.0
     double hours = 1.0
@@ -151,34 +168,24 @@ def updateHistory() {
         drop = lastValidPoint.rawMoisture - rawMoist
         // Floor at 1h so a rescheduled scan minutes after the last one doesn't inflate the rate
         hours = Math.max(1.0d, (now - (lastValidPoint.time as long)) / 3600000.0d)
-        // Fast drops above Field Capacity are normal post-watering drainage
-        boolean draining = lastValidPoint.isFcOutlier ?: false
-        if (!draining && drop / hours > 2.0) {
+        if (drop / hours > 2.0) {
             isSpeedOutlier = true
         }
     }
 
-    int capacity = pref("fieldCapacity").toInteger()
-    boolean isFcOutlier = (!isSpeedOutlier && rawMoist > capacity)
-
-    // Build the status string and log exactly once per hour
     if (isSpeedOutlier) {
         statusText = "Rejected - Speed Limit hit (Diff: ${String.format('%.1f', drop)} over ${String.format('%.1f', hours)}h)"
         log.warn "${device.displayName} Hourly Scan -> ${statusText}"
-    } else if (isFcOutlier) {
-        statusText = "Rejected - ${rawMoist} Above set FC (${capacity})"
-        logDebug "Hourly Scan -> ${statusText}"
     } else {
         logDebug "Hourly Scan -> Success (${rawMoist})"
     }
 
-    // Save all details into the array so the table builder doesn't have to guess
     state.history << [
-        time: now, 
-        rawMoisture: rawMoist, 
-        statusText: statusText, 
-        isSpeedOutlier: isSpeedOutlier, 
-        isFcOutlier: isFcOutlier
+        time: now,
+        rawMoisture: rawMoist,
+        statusText: statusText,
+        isSpeedOutlier: isSpeedOutlier,
+        isDraining: false
     ]
 
     // A drop that holds steady for 5 scans is a real step change (sensor moved/bumped), not a glitch
@@ -188,21 +195,129 @@ def updateHistory() {
         if (recent.every { it.isSpeedOutlier ?: false } && (levels.max() - levels.min()) <= 2.0) {
             log.warn "${device.displayName} Hourly Scan -> 5 steady readings after a drop. Starting new baseline at ${rawMoist}"
             state.history = recent.collect { entry ->
-                boolean fc = entry.rawMoisture > capacity
-                entry + [
-                    isSpeedOutlier: false,
-                    isFcOutlier: fc,
-                    statusText: (fc ? "Rejected - ${entry.rawMoisture} Above set FC (${capacity})" : "Accepted - New baseline after step change").toString()
-                ]
+                entry + [isSpeedOutlier: false, statusText: "Accepted - New baseline after step change"]
             }
+            clearLearnedFc()
         }
     }
 
+    trimHistory(now)
+    updatePlantCard(true)
+}
+
+private void trimHistory(long now) {
     long cutoff = now - 259200000 // 3 Days
     state.history = state.history.findAll { it.time >= cutoff }
+}
 
-    // Pass 'true' to trigger the hourly ET math log
-    updatePlantCard(true) 
+private List validPoints() {
+    (state.history ?: []).findAll { !(it.isSpeedOutlier ?: false) && !(it.isDraining ?: false) }
+}
+
+// Gaps are measured between all scans, so a run of rejected readings doesn't count as one
+private List etWindow() {
+    List history = state.history ?: []
+    int start = 0
+    for (int i = history.size() - 1; i > 0; i--) {
+        if ((history[i].time as long) - (history[i - 1].time as long) > ET.gapMs) {
+            start = i
+            break
+        }
+    }
+    history.drop(start).findAll { !(it.isSpeedOutlier ?: false) && !(it.isDraining ?: false) }
+}
+
+private Map windowRate(List points) {
+    if (points.size() < ET.minPoints) return null
+    long spanMs = (points[-1].time as long) - (points[0].time as long)
+    if (spanMs <= 0) return null
+    double dropped = (points[0].rawMoisture as double) - (points[-1].rawMoisture as double)
+    [rate: Math.max(0.0d, dropped / (spanMs / 86400000.0d)), spanMs: spanMs]
+}
+
+private void saveCycleRate() {
+    Map cycle = windowRate(etWindow())
+    if (cycle == null || cycle.spanMs < ET.minCycleMs || cycle.rate <= 0) {
+        logInfo "drying cycle was too short or flat to learn from. Keeping the saved ET rate."
+        return
+    }
+    double days = cycle.spanMs / 86400000.0d
+    if (state.savedEtRate == null) {
+        state.savedEtRate = cycle.rate
+        state.savedEtDays = days
+        logInfo "learned an ET rate of ${String.format('%.1f', cycle.rate)}%/day from ${String.format('%.1f', days)} days of drying"
+        return
+    }
+    double oldRate = state.savedEtRate as double
+    double oldDays = state.savedEtDays != null ? state.savedEtDays as double : 1.0d
+    state.savedEtRate = (oldRate * oldDays + cycle.rate * days) / (oldDays + days)
+    state.savedEtDays = Math.min(ET.maxSavedDays as double, oldDays + days)
+    logInfo "this cycle dried at ${String.format('%.1f', cycle.rate)}%/day over ${String.format('%.1f', days)} days. Saved ET rate ${String.format('%.1f', oldRate)} -> ${String.format('%.1f', state.savedEtRate as double)}%/day"
+}
+
+private void startDrainage(double moisture, long now) {
+    state.wateredAt = now
+    state.drainPeak = [time: now, moisture: moisture]
+    state.drainSamples = [[time: now, moisture: moisture]]
+    logDebug "Drainage -> Started at ${moisture}"
+}
+
+private void trackDrainage(double moisture, long now) {
+    if (now - (state.wateredAt as long) >= DRAIN.maxMs) {
+        finishDrainage(moisture, now)
+        return
+    }
+    if (moisture > state.drainPeak.moisture) {
+        state.drainPeak = [time: now, moisture: moisture]
+    }
+    def samples = state.drainSamples + [[time: now, moisture: moisture]]
+    long windowStart = now - DRAIN.windowMs
+    def older = samples.findAll { (it.time as long) <= windowStart }
+    state.drainSamples = (older ? [older[-1]] : []) + samples.findAll { (it.time as long) > windowStart }
+
+    if (now - (state.drainPeak.time as long) < DRAIN.windowMs || !older) return
+    def ref = older[-1]
+    double ratePerHr = (ref.moisture - moisture) / ((now - (ref.time as long)) / 3600000.0d)
+    logDebug "Drainage -> ${moisture}, dropping ${String.format('%.2f', ratePerHr)}%/hr"
+    if (ratePerHr < DRAIN.endRatePerHr) finishDrainage(moisture, now)
+}
+
+private void finishDrainage(double moisture, long now) {
+    double drained = state.drainPeak.moisture - moisture
+    long mins = Math.round((now - (state.wateredAt as long)) / 60000.0d)
+    boolean timedOut = now - (state.wateredAt as long) >= DRAIN.maxMs
+    String drainedText = "drained ${String.format('%.1f', drained)} over ${mins} min"
+    String statusText = timedOut ? "Drainage timed out - ${drainedText}" : "Drainage complete - ${drainedText}"
+
+    if (state.history == null) state.history = []
+    state.history << [time: now, rawMoisture: moisture, statusText: statusText, isSpeedOutlier: false, isDraining: false]
+    ["wateredAt", "drainPeak", "drainSamples"].each { state.remove(it) }
+
+    if (timedOut) {
+        logInfo "drainage still going after ${mins} min, no field capacity sample taken"
+    } else if (drained < DRAIN.soakMinDrop) {
+        logInfo "drainage done, ${drainedText}. Looks like a partial watering, no field capacity sample taken"
+    } else {
+        recordFcSample(moisture, drainedText)
+    }
+}
+
+private void recordFcSample(double moisture, String drainedText) {
+    List samples = ((state.fcSamples ?: []) + [moisture]).takeRight(DRAIN.fcSamplesKept)
+    state.fcSamples = samples
+    List sorted = samples.sort(false)
+    int n = sorted.size()
+    double median = n % 2 ? sorted[n.intdiv(2)] : (sorted[n.intdiv(2) - 1] + sorted[n.intdiv(2)]) / 2.0
+    BigDecimal learned = new BigDecimal(median).setScale(1, RoundingMode.HALF_UP)
+    String soaks = n == 1 ? "1 soak" : "${n} soaks"
+    sendEvent(name: "learnedFieldCapacity", value: learned, unit: "%", descriptionText: "${device.displayName} learned field capacity is ${learned} from ${soaks} (shadow, not in use)")
+    sendEvent(name: "debugFcSampleCount", value: n)
+    logInfo "soak detected, ${drainedText}, settled at ${moisture}. Learned field capacity now ${learned} from ${soaks} (your setting: ${pref('fieldCapacity')})"
+}
+
+private void clearLearnedFc() {
+    state.remove("fcSamples")
+    ["learnedFieldCapacity", "debugFcSampleCount"].each { device.deleteCurrentState(it) }
 }
 
 def updatePlantCard(boolean isHourlyCron = false) {
@@ -218,43 +333,17 @@ def updatePlantCard(boolean isHourlyCron = false) {
     int maxDays = pref("maxDaysLimit").toInteger()
 
     long now = new Date().getTime()
-    if (state.history == null) state.history = hasReading ? [[time: now, rawMoisture: rawMoist, statusText: "Success", isSpeedOutlier: false, isFcOutlier: false]] : []
+    if (state.history == null) state.history = hasReading ? [[time: now, rawMoisture: rawMoist, statusText: "Success", isSpeedOutlier: false, isDraining: false]] : []
 
     // Find the last valid point for watering detection (so speed glitches don't reset memory)
-    def validHistory = state.history.findAll { !(it.isSpeedOutlier ?: false) }
+    def validHistory = validPoints()
     def lastValidPoint = validHistory ? validHistory[-1] : (state.history ? state.history[-1] : null)
 
-    if (lastValidPoint != null && rawMoist > (lastValidPoint.rawMoisture + 5)) {
+    if (state.drainSamples == null && lastValidPoint != null && rawMoist > (lastValidPoint.rawMoisture + 5)) {
         logInfo "watered. Calculating previous ET rate and resetting memory."
-
-        // FILTER: Check valid raw values against the calibrated capacity 
-        def etPoints = state.history.findAll { !(it.isSpeedOutlier ?: false) && !(it.isFcOutlier ?: false) }
-
-        // GUARDRAIL 1: Need at least 5 points (5 hours) to save a valid historical rate
-        if (etPoints.size() >= 5) {
-            def oldest = etPoints[0]
-            def newest = etPoints[-1]
-            long elapsedMs = newest.time - oldest.time
-            double elapsedDays = elapsedMs / 86400000.0
-            double dropped = oldest.rawMoisture - newest.rawMoisture 
-
-            if (elapsedDays > 0 && dropped > 0) {
-                double newRate = dropped / elapsedDays
-                
-                // GUARDRAIL 3: Blended Memory (Average new rate with historical average)
-                if (state.savedEtRate != null) {
-                    state.savedEtRate = (state.savedEtRate + newRate) / 2.0
-                    logInfo "Blended new rate (${String.format('%.1f', newRate)}%/day) with history. New average: ${String.format('%.1f', state.savedEtRate)}%/day"
-                } else {
-                    state.savedEtRate = newRate
-                }
-            }
-        } else {
-            logInfo "Not enough valid data points (< 5) to update ET Rate history. Keeping previous average."
-        }
-
-        // Wait to record the watering spike on the next normal interval instead of forcing an immediate zero-point
+        saveCycleRate()
         state.history = []
+        startDrainage(rawMoist, now)
     }
 
     // Visual ring gauge maps the distance between Wilting Point (empty) and Field Capacity (full)
@@ -273,34 +362,27 @@ def updatePlantCard(boolean isHourlyCron = false) {
     String daysLeft = "--"
     double dropPerDay = 0.0
 
-    // Get live ET points, actively removing speed outliers and gravitational drainage
-    def liveEtPoints = state.history.findAll { !(it.isSpeedOutlier ?: false) && !(it.isFcOutlier ?: false) }
-    int pointCount = liveEtPoints.size()
-
-    // GUARDRAIL 1 (Live): Calculate live ET. Fall back to history ONLY if building buffer.
-    if (pointCount >= 5) {
-        def oldest = liveEtPoints[0]
-        def newest = liveEtPoints[-1]
-        long elapsedMs = newest.time - oldest.time
-        double elapsedDays = elapsedMs / 86400000.0
-        double dropped = oldest.rawMoisture - newest.rawMoisture
-
-        if (elapsedDays > 0 && dropped > 0) {
-            dropPerDay = dropped / elapsedDays
-        }
-    } else if (state.savedEtRate != null) {
-        dropPerDay = state.savedEtRate as double
+    List windowPoints = etWindow()
+    Map live = windowRate(windowPoints)
+    Double saved = state.savedEtRate != null ? state.savedEtRate as double : null
+    String etMath
+    if (live != null && saved != null) {
+        // Short windows swing with the day/night cycle, so lean on the saved rate until a full day is covered
+        double w = Math.min(1.0d, live.spanMs / (ET.blendMs as double))
+        dropPerDay = w * live.rate + (1.0d - w) * saved
+        etMath = "live ${String.format('%.1f', live.rate)} over ${String.format('%.1f', live.spanMs / 3600000.0d)}h, saved ${String.format('%.1f', saved)}, live weight ${Math.round(w * 100)}%"
+    } else if (live != null) {
+        dropPerDay = live.rate
+        etMath = "live ${String.format('%.1f', live.rate)} over ${String.format('%.1f', live.spanMs / 3600000.0d)}h, no saved rate yet"
+    } else if (saved != null) {
+        dropPerDay = saved
+        etMath = "${windowPoints.size()}/${ET.minPoints} scans since the last gap or watering, using saved rate"
+    } else {
+        etMath = "${windowPoints.size()}/${ET.minPoints} scans since the last gap or watering, gathering data"
     }
 
-    // Print the ET Math log ONLY during the hourly cron trigger
     if (isHourlyCron) {
-        if (pointCount >= 5) {
-            logDebug "ET Math -> (Using live calculated ET Rate: ${String.format('%.1f', dropPerDay)}%/day)"
-        } else if (state.savedEtRate != null) {
-            logDebug "ET Math -> (${pointCount}/5 consecutive scans in history, using saved ET Rate: ${String.format('%.1f', dropPerDay)}%/day)"
-        } else {
-            logDebug "ET Math -> (${pointCount}/5 consecutive scans in history, gathering data)"
-        }
+        logDebug "ET Math -> ${String.format('%.1f', dropPerDay)}%/day (${etMath})"
     }
 
     // Calculate estimated days remaining before hitting the Watering Threshold (Gas Light)
@@ -315,7 +397,7 @@ def updatePlantCard(boolean isHourlyCron = false) {
         }
     } else if (rawMoist <= waterTarget) {
         daysLeft = "0.0"
-    } else if (dropPerDay == 0.0 && rawMoist > waterTarget && pointCount >= 5) {
+    } else if (dropPerDay == 0.0 && rawMoist > waterTarget && live != null) {
         // Embrace the flatline: Plant is stable, no measurable drop
         daysLeft = "> ${maxDays}"
     }
@@ -332,14 +414,21 @@ def updatePlantCard(boolean isHourlyCron = false) {
     int battWidth = battVal
     boolean isDry = hasReading && rawMoist <= waterTarget
     if (hasReading) sendEvent(name: "contact", value: isDry ? "open" : "closed")
+    String updated = "--"
+    if (state.lastReportAt != null) {
+        Date seen = new Date(state.lastReportAt as long)
+        String fmt = seen.format("yyyyMMdd", location.timeZone) == new Date(now).format("yyyyMMdd", location.timeZone) ? "h:mm a" : "MM/dd h:mm a"
+        updated = seen.format(fmt, location.timeZone)
+    }
+    String staleClass = device.currentValue("healthStatus") == "offline" ? " is-stale" : ""
     String stateClass = ""
     String centerBig = daysLeft
     String centerSmall = "DAYS LEFT"
 
     if (isDry) {
-        // Replaces the word "DRY" with the terracotta SVG water drop
+        // The water drop icon is drawn by the dashboard CSS to save card characters
         stateClass = "is-dry"
-        centerBig = """<svg width="32" height="32" viewBox="0 0 24 24" fill="currentColor"><path d="M12 20a6 6 0 0 1-6-6c0-4 6-10.75 6-10.75S18 10 18 14a6 6 0 0 1-6 6z"/></svg>"""
+        centerBig = ""
         centerSmall = "WATER NOW"
     } else if (daysLeft == "--" || daysLeft == "0.0") {
         stateClass = "is-calc"
@@ -347,7 +436,7 @@ def updatePlantCard(boolean isHourlyCron = false) {
         centerSmall = "GATHERING DATA"
     }
 
-    String cardHtml = """<div class="pw-wrap ${stateClass}"><div class="pw-head"><a href="/device/edit/${device.id}" target="_blank" class="pw-title" title="Click to edit threshold">${cleanName}</a><div class="pw-batt ${battClass}"><div class="pw-b-icon"><div class="pw-b-fill" style="width:${battWidth}%;"></div></div><div class="pw-b-txt">${batt}%</div></div></div><div class="pw-hero"><div class="pw-ring" style="--val:${displayPct};"><div class="pw-ring-in"><div class="pw-val">${centerBig}</div><div class="pw-pct">${centerSmall}</div></div></div></div><div class="pw-foot"><div class="pw-metrics"><span class="pw-temp">💧 ${moist}%</span><span class="pw-temp">🌡 ${temp}°${location.temperatureScale}</span></div></div></div>"""
+    String cardHtml = """<div class="pw-wrap ${stateClass}${staleClass}"><div class="pw-head"><a href="/device/edit/${device.id}" target="_blank" class="pw-title" title="Click to edit threshold">${cleanName}</a><div class="pw-batt ${battClass}"><div class="pw-b-icon"><div class="pw-b-fill" style="width:${battWidth}%;"></div></div><div class="pw-b-txt">${batt}%</div></div></div><div class="pw-hero"><div class="pw-ring" style="--val:${displayPct};"><div class="pw-ring-in"><div class="pw-val">${centerBig}</div><div class="pw-pct">${centerSmall}</div></div></div></div><div class="pw-foot"><div class="pw-metrics"><span class="pw-temp">💧 ${moist}%</span><span class="pw-temp">🌡 ${temp}°${location.temperatureScale}</span></div></div><div class="pw-upd">Updated ${updated}</div></div>"""
     sendEvent(name: "plantCard", value: cardHtml)
 }
 
@@ -358,9 +447,9 @@ def logHistory() {
         return
     }
     String rows = history.collect { entry ->
-        boolean isBad = (entry.isSpeedOutlier ?: false) || (entry.isFcOutlier ?: false)
+        String color = (entry.isSpeedOutlier ?: false) ? "#d9534f" : ((entry.isDraining ?: false) ? "#888" : null)
         String readableDate = new Date(entry.time as long).format("MM/dd h:mm a")
-        "<tr${isBad ? " style='color:#d9534f'" : ""}><td>${readableDate}</td><td>${entry.rawMoisture}</td><td>${entry.statusText ?: 'Success'}</td></tr>"
+        "<tr${color ? " style='color:${color}'" : ""}><td>${readableDate}</td><td>${entry.rawMoisture}</td><td>${entry.statusText ?: 'Success'}</td></tr>"
     }.join()
     log.info "${device.displayName} history, oldest first:<table style='border-spacing:12px 0'><tr><th>Time</th><th>Moisture</th><th>Status</th></tr>${rows}</table>"
 }
@@ -386,9 +475,9 @@ def updated() {
 }
 
 def resetSensor(String resetCalibration = "No") {
-    log.info "${device.displayName} reset: clearing history and learned ET rate"
-    state.remove("history")
-    state.remove("savedEtRate")
+    log.info "${device.displayName} reset: clearing history, learned ET rate, and learned field capacity"
+    ["history", "savedEtRate", "savedEtDays", "wateredAt", "drainPeak", "drainSamples"].each { state.remove(it) }
+    clearLearnedFc()
 
     if (resetCalibration == "Yes") {
         log.info "${device.displayName} reset: restoring calibration settings to defaults"

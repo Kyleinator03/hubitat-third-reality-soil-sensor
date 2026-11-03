@@ -2,7 +2,7 @@
 
 A Hubitat driver for the Third Reality Zigbee soil moisture sensor, models 3RSM0147Z and 3RSM0347Z. It reports soil moisture, temperature, and battery level. It also learns how fast your soil dries and estimates how many days are left until the plant needs water.
 
-The driver builds a **Plant Card** for Hubitat dashboards. The card shows a ring for how much usable water is left in the soil, plus the days remaining, battery, moisture, and temperature. When the plant needs water, the card switches to a "WATER NOW" alert.
+The driver builds a **Plant Card** for Hubitat dashboards. The card shows a ring for how much usable water is left in the soil, plus the days remaining, battery, moisture, temperature, and when the sensor last reported. When the plant needs water, the card switches to a "WATER NOW" alert.
 
 ## What's in this repo
 
@@ -37,7 +37,9 @@ The ring and the days-left estimate use three moisture levels, all compared agai
 
 **Max Days Limit** caps the days-left display when the soil is drying very slowly. **Temperature Offset** shifts the temperature if your sensor reads high or low. Temperature follows your hub's Celsius or Fahrenheit setting, and the offset is in the same scale.
 
-The days-left estimate shows **CALC** until the driver has about five hours of history. After each watering, it averages the newest drying rate with past ones, so the estimate improves over time.
+The days-left estimate shows **CALC** until the driver has about five hours of history. Plants drink mostly during the day, so a few hours of readings can make the soil look like it's drying much faster or slower than it really is. After a watering, the driver starts from the drying rate it learned on earlier cycles and shifts toward the live rate over the first 24 hours. Each watering updates the learned rate, with longer drying cycles counting for more. Cycles shorter than 12 hours are ignored, so the estimate improves over time. If the hourly readings stop for more than three hours (the sensor dropped offline, or the hub stopped running scheduled jobs), the driver starts measuring again after the gap rather than across it.
+
+After a watering, the driver watches the sensor's reports until the extra water has drained out of the pot, then starts measuring the drying rate. Readings during drainage are left out of the estimate, so Field Capacity only sets where the ring is full and doesn't affect the days-left math.
 
 ## 3. Add the Plant Card to a dashboard
 
@@ -70,12 +72,16 @@ The device also acts as a contact sensor: **open** means the plant needs water (
 
 After importing a new version, click **Save Preferences** and then **Configure** on each device page. Saving clears out settings and attributes that older versions used, and Configure applies any new reporting settings, such as the battery percentage.
 
+If `dashboard.css` changed in the new version, paste it into your dashboard's CSS again. Version 1.3.0 moved the "WATER NOW" water drop icon into the CSS, so the icon disappears with older CSS.
+
 ## Notes
 
-- **Missing sensor.** If the hub hears nothing from the sensor for over two hours, the hourly scan is skipped and a warning is logged. This keeps a dead battery or lost signal from looking like a plant that has stopped drying out. The `healthStatus` attribute switches to `offline` at the same time and back to `online` on the next report, so you can get a Rule Machine notification about it.
+- **Missing sensor.** If the hub hears nothing from the sensor for over two hours, the hourly scan is skipped and a warning is logged. This keeps a dead battery or lost signal from looking like a plant that has stopped drying out. The `healthStatus` attribute switches to `offline` at the same time and back to `online` on the next report, so you can get a Rule Machine notification about it. While the sensor is offline, the Plant Card dims and its **Updated** time turns amber.
+- **Last updated time.** The bottom of the card shows when the hub last heard anything from the sensor. A plain time means today. Older reports also show the date. The time doesn't count up on its own, because dashboard tiles can't run scripts. It only changes when the sensor reports.
 - **Browser support.** The CSS uses the `:has()` selector to find Plant Card tiles. Current Chrome, Safari, Edge, and Firefox support it. Very old wall tablets may not, and the card will look unstyled there.
 - **Card title.** The title is the device name, minus a trailing "Soil Sensor" or "Moisture Sensor". Clicking it opens the device page. That link only works on your local network, not through a cloud dashboard link.
-- **Troubleshooting.** Click **Log History** on the device page to write the last three days of hourly readings to **Logs** as a table, with rejected readings in red. Turn on **Enable debug logging** to log every hourly scan and drying-rate calculation as it happens. It turns itself off after 24 hours.
+- **Experimental: learned Field Capacity.** After each full soak, the driver records the moisture reading where drainage stopped. The `learnedFieldCapacity` attribute is the median of the last five of those readings. It isn't used for anything yet. It's there to check how well it matches a manually measured Field Capacity before the driver relies on it. `debugFcSampleCount` shows how many soaks it's based on and will be removed later. A small drink that doesn't drain doesn't count as a soak.
+- **Troubleshooting.** Click **Log History** on the device page to write the last three days of hourly readings to **Logs** as a table, with rejected readings in red and post-watering drainage in gray. Turn on **Enable debug logging** to log every hourly scan and drying-rate calculation as it happens. It turns itself off after 24 hours.
 - **Customizing the card.** Hubitat won't show tile values longer than 1,024 characters. The driver keeps the card HTML short and puts all static styling in the CSS. Keep it that way if you change the card.
 
 ## License
