@@ -37,7 +37,7 @@ The ring and the days-left estimate use three moisture levels, all compared agai
 
 **Max Days Limit** caps the days-left display when the soil is drying very slowly. **Temperature Offset** shifts the temperature if your sensor reads high or low. Temperature follows your hub's Celsius or Fahrenheit setting, and the offset is in the same scale.
 
-The days-left estimate shows **CALC** until the driver has about five hours of history. After each watering, it averages the newest drying rate with past ones, so the estimate improves over time.
+The days-left estimate shows **CALC** until the driver has about five hours of history. Plants drink mostly during the day, so a few hours of readings can make the soil look like it's drying much faster or slower than it really is. After a watering, the driver starts from the drying rate it learned on earlier cycles and shifts toward the live rate over the first 24 hours. Each watering updates the learned rate, with longer drying cycles counting for more. Cycles shorter than 12 hours are ignored, so the estimate improves over time. If the hourly readings stop for more than three hours (the sensor dropped offline, or the hub stopped running scheduled jobs), the driver starts measuring again after the gap rather than across it.
 
 After a watering, the driver watches the sensor's reports until the extra water has drained out of the pot, then starts measuring the drying rate. Readings during drainage are left out of the estimate, so Field Capacity only sets where the ring is full and doesn't affect the days-left math.
 
