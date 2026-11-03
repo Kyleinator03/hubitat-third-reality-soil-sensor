@@ -11,6 +11,7 @@ import java.math.RoundingMode
 
 @Field static final Map DEFAULTS = [fieldCapacity: 75, wateringThreshold: 50, permanentWiltingPoint: 30, maxDaysLimit: 14, tempOffset: 0.0]
 @Field static final Map DRAIN = [windowMs: 1800000L, endRatePerHr: 1.0, maxMs: 21600000L, soakMinDrop: 2.0, fcSamplesKept: 5]
+@Field static final Map ET = [minPoints: 5, gapMs: 10800000L, blendMs: 86400000L, minCycleMs: 43200000L, maxSavedDays: 7.0]
 
 metadata {
     definition(name: "Third Reality Soil Moisture Sensor Custom", namespace: "kyleinator03", author: "Kyle", importUrl: "https://raw.githubusercontent.com/Kyleinator03/hubitat-third-reality-soil-sensor/main/third-reality-soil-sensor-custom.groovy") {
@@ -213,6 +214,47 @@ private List validPoints() {
     (state.history ?: []).findAll { !(it.isSpeedOutlier ?: false) && !(it.isDraining ?: false) }
 }
 
+// Gaps are measured between all scans, so a run of rejected readings doesn't count as one
+private List etWindow() {
+    List history = state.history ?: []
+    int start = 0
+    for (int i = history.size() - 1; i > 0; i--) {
+        if ((history[i].time as long) - (history[i - 1].time as long) > ET.gapMs) {
+            start = i
+            break
+        }
+    }
+    history.drop(start).findAll { !(it.isSpeedOutlier ?: false) && !(it.isDraining ?: false) }
+}
+
+private Map windowRate(List points) {
+    if (points.size() < ET.minPoints) return null
+    long spanMs = (points[-1].time as long) - (points[0].time as long)
+    if (spanMs <= 0) return null
+    double dropped = (points[0].rawMoisture as double) - (points[-1].rawMoisture as double)
+    [rate: Math.max(0.0d, dropped / (spanMs / 86400000.0d)), spanMs: spanMs]
+}
+
+private void saveCycleRate() {
+    Map cycle = windowRate(etWindow())
+    if (cycle == null || cycle.spanMs < ET.minCycleMs || cycle.rate <= 0) {
+        logInfo "drying cycle was too short or flat to learn from. Keeping the saved ET rate."
+        return
+    }
+    double days = cycle.spanMs / 86400000.0d
+    if (state.savedEtRate == null) {
+        state.savedEtRate = cycle.rate
+        state.savedEtDays = days
+        logInfo "learned an ET rate of ${String.format('%.1f', cycle.rate)}%/day from ${String.format('%.1f', days)} days of drying"
+        return
+    }
+    double oldRate = state.savedEtRate as double
+    double oldDays = state.savedEtDays != null ? state.savedEtDays as double : 1.0d
+    state.savedEtRate = (oldRate * oldDays + cycle.rate * days) / (oldDays + days)
+    state.savedEtDays = Math.min(ET.maxSavedDays as double, oldDays + days)
+    logInfo "this cycle dried at ${String.format('%.1f', cycle.rate)}%/day over ${String.format('%.1f', days)} days. Saved ET rate ${String.format('%.1f', oldRate)} -> ${String.format('%.1f', state.savedEtRate as double)}%/day"
+}
+
 private void startDrainage(double moisture, long now) {
     state.wateredAt = now
     state.drainPeak = [time: now, moisture: moisture]
@@ -299,32 +341,7 @@ def updatePlantCard(boolean isHourlyCron = false) {
 
     if (state.drainSamples == null && lastValidPoint != null && rawMoist > (lastValidPoint.rawMoisture + 5)) {
         logInfo "watered. Calculating previous ET rate and resetting memory."
-
-        def etPoints = validPoints()
-
-        // GUARDRAIL 1: Need at least 5 points (5 hours) to save a valid historical rate
-        if (etPoints.size() >= 5) {
-            def oldest = etPoints[0]
-            def newest = etPoints[-1]
-            long elapsedMs = newest.time - oldest.time
-            double elapsedDays = elapsedMs / 86400000.0
-            double dropped = oldest.rawMoisture - newest.rawMoisture 
-
-            if (elapsedDays > 0 && dropped > 0) {
-                double newRate = dropped / elapsedDays
-                
-                // GUARDRAIL 3: Blended Memory (Average new rate with historical average)
-                if (state.savedEtRate != null) {
-                    state.savedEtRate = (state.savedEtRate + newRate) / 2.0
-                    logInfo "Blended new rate (${String.format('%.1f', newRate)}%/day) with history. New average: ${String.format('%.1f', state.savedEtRate)}%/day"
-                } else {
-                    state.savedEtRate = newRate
-                }
-            }
-        } else {
-            logInfo "Not enough valid data points (< 5) to update ET Rate history. Keeping previous average."
-        }
-
+        saveCycleRate()
         state.history = []
         startDrainage(rawMoist, now)
     }
@@ -345,33 +362,27 @@ def updatePlantCard(boolean isHourlyCron = false) {
     String daysLeft = "--"
     double dropPerDay = 0.0
 
-    def liveEtPoints = validPoints()
-    int pointCount = liveEtPoints.size()
-
-    // GUARDRAIL 1 (Live): Calculate live ET. Fall back to history ONLY if building buffer.
-    if (pointCount >= 5) {
-        def oldest = liveEtPoints[0]
-        def newest = liveEtPoints[-1]
-        long elapsedMs = newest.time - oldest.time
-        double elapsedDays = elapsedMs / 86400000.0
-        double dropped = oldest.rawMoisture - newest.rawMoisture
-
-        if (elapsedDays > 0 && dropped > 0) {
-            dropPerDay = dropped / elapsedDays
-        }
-    } else if (state.savedEtRate != null) {
-        dropPerDay = state.savedEtRate as double
+    List windowPoints = etWindow()
+    Map live = windowRate(windowPoints)
+    Double saved = state.savedEtRate != null ? state.savedEtRate as double : null
+    String etMath
+    if (live != null && saved != null) {
+        // Short windows swing with the day/night cycle, so lean on the saved rate until a full day is covered
+        double w = Math.min(1.0d, live.spanMs / (ET.blendMs as double))
+        dropPerDay = w * live.rate + (1.0d - w) * saved
+        etMath = "live ${String.format('%.1f', live.rate)} over ${String.format('%.1f', live.spanMs / 3600000.0d)}h, saved ${String.format('%.1f', saved)}, live weight ${Math.round(w * 100)}%"
+    } else if (live != null) {
+        dropPerDay = live.rate
+        etMath = "live ${String.format('%.1f', live.rate)} over ${String.format('%.1f', live.spanMs / 3600000.0d)}h, no saved rate yet"
+    } else if (saved != null) {
+        dropPerDay = saved
+        etMath = "${windowPoints.size()}/${ET.minPoints} scans since the last gap or watering, using saved rate"
+    } else {
+        etMath = "${windowPoints.size()}/${ET.minPoints} scans since the last gap or watering, gathering data"
     }
 
-    // Print the ET Math log ONLY during the hourly cron trigger
     if (isHourlyCron) {
-        if (pointCount >= 5) {
-            logDebug "ET Math -> (Using live calculated ET Rate: ${String.format('%.1f', dropPerDay)}%/day)"
-        } else if (state.savedEtRate != null) {
-            logDebug "ET Math -> (${pointCount}/5 consecutive scans in history, using saved ET Rate: ${String.format('%.1f', dropPerDay)}%/day)"
-        } else {
-            logDebug "ET Math -> (${pointCount}/5 consecutive scans in history, gathering data)"
-        }
+        logDebug "ET Math -> ${String.format('%.1f', dropPerDay)}%/day (${etMath})"
     }
 
     // Calculate estimated days remaining before hitting the Watering Threshold (Gas Light)
@@ -386,7 +397,7 @@ def updatePlantCard(boolean isHourlyCron = false) {
         }
     } else if (rawMoist <= waterTarget) {
         daysLeft = "0.0"
-    } else if (dropPerDay == 0.0 && rawMoist > waterTarget && pointCount >= 5) {
+    } else if (dropPerDay == 0.0 && rawMoist > waterTarget && live != null) {
         // Embrace the flatline: Plant is stable, no measurable drop
         daysLeft = "> ${maxDays}"
     }
@@ -465,7 +476,7 @@ def updated() {
 
 def resetSensor(String resetCalibration = "No") {
     log.info "${device.displayName} reset: clearing history, learned ET rate, and learned field capacity"
-    ["history", "savedEtRate", "wateredAt", "drainPeak", "drainSamples"].each { state.remove(it) }
+    ["history", "savedEtRate", "savedEtDays", "wateredAt", "drainPeak", "drainSamples"].each { state.remove(it) }
     clearLearnedFc()
 
     if (resetCalibration == "Yes") {
