@@ -9,9 +9,9 @@
 import groovy.transform.Field
 import java.math.RoundingMode
 
-@Field static final Map DEFAULTS = [fieldCapacity: 75, wateringThreshold: 50, permanentWiltingPoint: 30, maxDaysLimit: 14, tempOffset: 0.0]
+@Field static final Map DEFAULTS = [fieldCapacity: 75, wateringThreshold: 50, permanentWiltingPoint: 30, tempOffset: 0.0]
 @Field static final Map DRAIN = [windowMs: 1800000L, endRatePerHr: 1.0, maxMs: 21600000L, soakMinDrop: 2.0, fcSamplesKept: 5]
-@Field static final Map ET = [minPoints: 5, gapMs: 10800000L, blendMs: 86400000L, minCycleMs: 43200000L, maxSavedDays: 7.0]
+@Field static final Map ET = [minPoints: 5, gapMs: 10800000L, blendMs: 86400000L, minCycleMs: 43200000L, maxSavedDays: 7.0, stepPct: 0.15, maxDaysShown: 99]
 
 metadata {
     definition(name: "Third Reality Soil Moisture Sensor Custom", namespace: "kyleinator03", author: "Kyle", importUrl: "https://raw.githubusercontent.com/Kyleinator03/hubitat-third-reality-soil-sensor/main/third-reality-soil-sensor-custom.groovy") {
@@ -42,7 +42,6 @@ metadata {
         input name: "fieldCapacity", type: "number", title: "Field Capacity (%)", description: "The maximum amount of water the soil holds against gravity. Set this to the sensor's moisture reading about an hour after a full soaking drain. (e.g., 72)", defaultValue: DEFAULTS.fieldCapacity, required: true
         input name: "wateringThreshold", type: "number", title: "Watering Threshold (%)", description: "The moisture level where the plant actually needs to be watered. This triggers the 'WATER NOW' alert and is the target for the Days Left countdown. (e.g., 50)", defaultValue: DEFAULTS.wateringThreshold, required: true
         input name: "permanentWiltingPoint", type: "number", title: "Permanent Wilting Point (%)", description: "The absolute zero limit where the plant can no longer extract water. This sets the 0% visual empty state of the blue ring gauge. (e.g., 30)", defaultValue: DEFAULTS.permanentWiltingPoint, required: true
-        input name: "maxDaysLimit", type: "number", title: "Max Days Limit", description: "The maximum days left to display when the plant is stable or drying extremely slowly. (e.g., 21)", defaultValue: DEFAULTS.maxDaysLimit, required: true
         input name: "tempOffset", type: "decimal", title: "Temperature Offset (°)", description: "In your hub's temperature scale.", defaultValue: DEFAULTS.tempOffset, required: false
         input name: "txtEnable", type: "bool", title: "Enable descriptionText logging", description: "Logs readings, waterings, and learned drying rates.", defaultValue: true
         input name: "logEnable", type: "bool", title: "Enable debug logging", description: "Logs every hourly scan and ET calculation. Turns itself off after 24 hours.", defaultValue: false
@@ -330,7 +329,6 @@ def updatePlantCard(boolean isHourlyCron = false) {
     int threshold = pref("permanentWiltingPoint").toInteger()
     int capacity = pref("fieldCapacity").toInteger()
     int waterTarget = pref("wateringThreshold").toInteger()
-    int maxDays = pref("maxDaysLimit").toInteger()
 
     long now = new Date().getTime()
     if (state.history == null) state.history = hasReading ? [[time: now, rawMoisture: rawMoist, statusText: "Success", isSpeedOutlier: false, isDraining: false]] : []
@@ -389,17 +387,14 @@ def updatePlantCard(boolean isHourlyCron = false) {
     if (!hasReading) {
         daysLeft = "--"
     } else if (dropPerDay > 0 && rawMoist > waterTarget) {
-        double days = (rawMoist - waterTarget) / dropPerDay
-        if (days > maxDays) {
-            daysLeft = "> ${maxDays}"
-        } else {
-            daysLeft = String.format("%.1f", days)
-        }
+        daysLeft = formatDays((rawMoist - waterTarget) / dropPerDay)
     } else if (rawMoist <= waterTarget) {
         daysLeft = "0.0"
-    } else if (dropPerDay == 0.0 && rawMoist > waterTarget && live != null) {
-        // Embrace the flatline: Plant is stable, no measurable drop
-        daysLeft = "> ${maxDays}"
+    } else if (live != null) {
+        // No drop of even one sensor step over the window caps the rate, which gives a guaranteed minimum
+        double maxRate = ET.stepPct / (live.spanMs / 86400000.0d)
+        int minDays = Math.floor((rawMoist - waterTarget) / maxRate).toInteger()
+        daysLeft = "${Math.min(minDays, ET.maxDaysShown as int)}+"
     }
 
     sendEvent(name: "etRate", value: new BigDecimal(dropPerDay).setScale(1, RoundingMode.HALF_UP), unit: "%/day")
@@ -440,6 +435,11 @@ def updatePlantCard(boolean isHourlyCron = false) {
     sendEvent(name: "plantCard", value: cardHtml)
 }
 
+private String formatDays(double days) {
+    if (days > ET.maxDaysShown) return "${ET.maxDaysShown}+"
+    days < 10 ? String.format("%.1f", days) : Math.round(days).toString()
+}
+
 def logHistory() {
     def history = state.history ?: []
     if (!history) {
@@ -468,7 +468,7 @@ def updated() {
         state.moisture = device.currentValue("rawMoisture")
     }
     ["historyTable", "soilMoisture", "rawMoisture"].each { device.deleteCurrentState(it) }
-    device.removeSetting("moistOffset")
+    ["moistOffset", "maxDaysLimit"].each { device.removeSetting(it) }
     scheduleHistory()
     if (logEnable) runIn(86400, "logsOff")
     updatePlantCard()
