@@ -39,6 +39,8 @@ The ring and the days-left estimate use three moisture levels, all compared agai
 
 The days-left estimate shows **CALC** until the driver has about five hours of history. After each watering, it averages the newest drying rate with past ones, so the estimate improves over time.
 
+After a watering, the driver watches the sensor's reports until the extra water has drained out of the pot, then starts measuring the drying rate. Readings during drainage are left out of the estimate, so Field Capacity only sets where the ring is full and doesn't affect the days-left math.
+
 ## 3. Add the Plant Card to a dashboard
 
 The card needs the classic **Hubitat Dashboard** app. **Easy Dashboard** doesn't support custom CSS, so the card won't be styled there.
@@ -75,7 +77,8 @@ After importing a new version, click **Save Preferences** and then **Configure**
 - **Missing sensor.** If the hub hears nothing from the sensor for over two hours, the hourly scan is skipped and a warning is logged. This keeps a dead battery or lost signal from looking like a plant that has stopped drying out. The `healthStatus` attribute switches to `offline` at the same time and back to `online` on the next report, so you can get a Rule Machine notification about it.
 - **Browser support.** The CSS uses the `:has()` selector to find Plant Card tiles. Current Chrome, Safari, Edge, and Firefox support it. Very old wall tablets may not, and the card will look unstyled there.
 - **Card title.** The title is the device name, minus a trailing "Soil Sensor" or "Moisture Sensor". Clicking it opens the device page. That link only works on your local network, not through a cloud dashboard link.
-- **Troubleshooting.** Click **Log History** on the device page to write the last three days of hourly readings to **Logs** as a table, with rejected readings in red. Turn on **Enable debug logging** to log every hourly scan and drying-rate calculation as it happens. It turns itself off after 24 hours.
+- **Experimental: learned Field Capacity.** After each full soak, the driver records the moisture reading where drainage stopped. The `learnedFieldCapacity` attribute is the median of the last five of those readings. It isn't used for anything yet. It's there to check how well it matches a manually measured Field Capacity before the driver relies on it. `debugFcSampleCount` shows how many soaks it's based on and will be removed later. A small drink that doesn't drain doesn't count as a soak.
+- **Troubleshooting.** Click **Log History** on the device page to write the last three days of hourly readings to **Logs** as a table, with rejected readings in red and post-watering drainage in gray. Turn on **Enable debug logging** to log every hourly scan and drying-rate calculation as it happens. It turns itself off after 24 hours.
 - **Customizing the card.** Hubitat won't show tile values longer than 1,024 characters. The driver keeps the card HTML short and puts all static styling in the CSS. Keep it that way if you change the card.
 
 ## License
