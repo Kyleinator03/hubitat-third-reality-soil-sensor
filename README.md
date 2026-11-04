@@ -70,6 +70,15 @@ Hubitat's own **Events** tab still lists the old readings. The driver can't dele
 
 The device also acts as a contact sensor: **open** means the plant needs water (moisture is at or below the Watering Threshold), and **closed** means it's fine. Use it in Rule Machine, or expose it to Alexa or HomeKit as a "needs water" signal.
 
+## Logging
+
+The device page has two logging toggles. With both off, the driver only logs warnings (sensor offline, a new baseline after a sudden drop, or preference values that don't make sense), when the sensor comes back online, and replies to things you do, like saving preferences or clicking **Reset Sensor**.
+
+- **Enable descriptionText logging** (on by default) adds one check-in line per hourly scan, plus a line when the plant is watered, when drainage finishes, and when the plant starts or stops needing water. A check-in looks like `Fern 61.2% moisture, 74.1°F, battery 90%. ET 3.1%/day, 3.6 days left`.
+- **Enable debug logging** adds every sensor reading, every hourly scan (including rejected readings), the drying-rate math, and each drainage sample. Debug lines start with `reading:`, `scan:`, `et:`, or `drain:` so they're easy to filter. It turns itself off after 24 hours.
+
+Every reading is also recorded in the device's **Events** tab, whichever logging toggles are on.
+
 ## Updating the driver
 
 After importing a new version, click **Save Preferences** and then **Configure** on each device page. Saving clears out settings and attributes that older versions used, and Configure applies any new reporting settings, such as the battery percentage.
@@ -83,7 +92,7 @@ If `dashboard.css` changed in the new version, paste it into your dashboard's CS
 - **Browser support.** The CSS uses the `:has()` selector to find Plant Card tiles. Current Chrome, Safari, Edge, and Firefox support it. Very old wall tablets may not, and the card will look unstyled there.
 - **Card title.** The title is the device name, minus a trailing "Soil Sensor" or "Moisture Sensor". Clicking it opens the device page. That link only works on your local network, not through a cloud dashboard link.
 - **Experimental: learned Field Capacity.** After each full soak, the driver records the moisture reading where drainage stopped. The `learnedFieldCapacity` attribute is the median of the last five of those readings. It isn't used for anything yet. It's there to check how well it matches a manually measured Field Capacity before the driver relies on it. `debugFcSampleCount` shows how many soaks it's based on and will be removed later. A small drink that doesn't drain doesn't count as a soak.
-- **Troubleshooting.** Click **Log History** on the device page to write the last three days of hourly readings to **Logs** as a table, with rejected readings in red and post-watering drainage in gray. Turn on **Enable debug logging** to log every hourly scan and drying-rate calculation as it happens. It turns itself off after 24 hours.
+- **Troubleshooting.** Click **Log History** on the device page to write the last three days of hourly readings to **Logs** as a table, with rejected readings in red and post-watering drainage in gray. Turn on **Enable debug logging** to see every reading and calculation as it happens (see [Logging](#logging)).
 - **Customizing the card.** Hubitat won't show tile values longer than 1,024 characters. The driver keeps the card HTML short and puts all static styling in the CSS. Keep it that way if you change the card.
 
 ## License

@@ -1,7 +1,7 @@
 /**
  *  Third Reality Soil Moisture Sensor (with Smart Plant Card & ET Prediction)
  *
- *  Version: 1.3.0
+ *  Version: 1.4.0
  *  https://github.com/Kyleinator03/hubitat-third-reality-soil-sensor
  *  License: GPL-3.0
  */
@@ -43,8 +43,8 @@ metadata {
         input name: "wateringThreshold", type: "number", title: "Watering Threshold (%)", description: "The moisture level where the plant actually needs to be watered. This triggers the 'WATER NOW' alert and is the target for the Days Left countdown. (e.g., 50)", defaultValue: DEFAULTS.wateringThreshold, required: true
         input name: "permanentWiltingPoint", type: "number", title: "Permanent Wilting Point (%)", description: "The absolute zero limit where the plant can no longer extract water. This sets the 0% visual empty state of the blue ring gauge. (e.g., 30)", defaultValue: DEFAULTS.permanentWiltingPoint, required: true
         input name: "tempOffset", type: "decimal", title: "Temperature Offset (°)", description: "In your hub's temperature scale.", defaultValue: DEFAULTS.tempOffset, required: false
-        input name: "txtEnable", type: "bool", title: "Enable descriptionText logging", description: "Logs readings, waterings, and learned drying rates.", defaultValue: true
-        input name: "logEnable", type: "bool", title: "Enable debug logging", description: "Logs every hourly scan and ET calculation. Turns itself off after 24 hours.", defaultValue: false
+        input name: "txtEnable", type: "bool", title: "Enable descriptionText logging", description: "Hourly check-ins, waterings, drainage, and learned values.", defaultValue: true
+        input name: "logEnable", type: "bool", title: "Enable debug logging", description: "Every reading, scan, and calculation. Turns itself off after 24 hours.", defaultValue: false
     }
 }
 
@@ -60,9 +60,21 @@ private void logInfo(String msg) {
     if (txtEnable != false) log.info "${device.displayName} ${msg}"
 }
 
+private void logAlways(String msg) {
+    log.info "${device.displayName} ${msg}"
+}
+
+private void logWarn(String msg) {
+    log.warn "${device.displayName} ${msg}"
+}
+
+private String fmt1(Number n) {
+    String.format('%.1f', n as double)
+}
+
 def logsOff() {
     device.updateSetting("logEnable", [value: "false", type: "bool"])
-    log.info "${device.displayName} debug logging turned off"
+    logAlways "debug logging turned off"
 }
 
 private void scheduleHistory() {
@@ -76,8 +88,10 @@ def installed() {
 
 def parse(String description) {
     state.lastReportAt = now()
-    if (device.currentValue("healthStatus") != "online") {
+    String health = device.currentValue("healthStatus")
+    if (health != "online") {
         sendEvent(name: "healthStatus", value: "online", descriptionText: "${device.displayName} is online")
+        if (health == "offline") logAlways "is back online"
     }
     def descMap = zigbee.parseDescriptionAsMap(description)
     if (descMap?.value == null) return
@@ -88,7 +102,7 @@ def parse(String description) {
         int rounded = Math.min(100, Math.max(0, Math.round(moisture).toInteger()))
         boolean changed = device.currentValue("humidity") != rounded
         sendEvent(name: "humidity", value: rounded, unit: "%", descriptionText: "${device.displayName} soil moisture is ${rounded}%")
-        if (changed) logInfo "soil moisture is ${rounded}% (${moisture})"
+        if (changed) logDebug "reading: soil moisture is ${rounded}% (${moisture})"
         if (state.drainSamples != null) trackDrainage(moisture as double, now())
         updatePlantCard()
     } else if (descMap.clusterInt == 0x0402 && descMap.attrInt == 0x0000) {
@@ -101,7 +115,7 @@ def parse(String description) {
         BigDecimal rounded = new BigDecimal(temp).setScale(1, RoundingMode.HALF_UP)
         boolean changed = device.currentValue("temperature") != rounded
         sendEvent(name: "temperature", value: rounded, unit: "°${scale}", descriptionText: "${device.displayName} temperature is ${rounded}°${scale}")
-        if (changed) logInfo "temperature is ${rounded}°${scale}"
+        if (changed) logDebug "reading: temperature is ${rounded}°${scale}"
         updatePlantCard()
     } else if (descMap.clusterInt == 0x0001 && descMap.attrInt == 0x0021) {
         int rawPct = Integer.parseInt(descMap.value, 16)
@@ -119,22 +133,22 @@ private void sendBattery(int pct) {
     pct = Math.min(100, Math.max(0, pct))
     boolean changed = device.currentValue("battery") != pct
     sendEvent(name: "battery", value: pct, unit: "%", descriptionText: "${device.displayName} battery is ${pct}%")
-    if (changed) logInfo "battery is ${pct}%"
+    if (changed) logDebug "reading: battery is ${pct}%"
     updatePlantCard()
 }
 
 def updateHistory() {
     long now = new Date().getTime()
     if (state.moisture == null) {
-        logDebug "Hourly Scan -> Skipped, no moisture reading yet"
+        logDebug "scan: skipped, no moisture reading yet"
         return
     }
     if (state.lastReportAt != null && now - (state.lastReportAt as long) > 7200000) {
         if (device.currentValue("healthStatus") != "offline") {
-            log.warn "${device.displayName} Hourly Scan -> Skipped, nothing heard from the sensor in over 2 hours. Check the sensor's battery and signal."
+            logWarn "is offline, nothing heard from the sensor in over 2 hours. Hourly scans are paused until it reports again. Check the sensor's battery and signal."
             sendEvent(name: "healthStatus", value: "offline", descriptionText: "${device.displayName} is offline")
         } else {
-            logDebug "Hourly Scan -> Skipped, sensor still offline"
+            logDebug "scan: skipped, sensor still offline"
         }
         updatePlantCard()
         return
@@ -148,7 +162,7 @@ def updateHistory() {
             finishDrainage(rawMoist, now)
         } else {
             state.history << [time: now, rawMoisture: rawMoist, statusText: "Draining", isSpeedOutlier: false, isDraining: true]
-            logDebug "Hourly Scan -> Draining (${rawMoist})"
+            logDebug "scan: draining (${rawMoist})"
         }
         trimHistory(now)
         updatePlantCard(true)
@@ -173,10 +187,10 @@ def updateHistory() {
     }
 
     if (isSpeedOutlier) {
-        statusText = "Rejected - Speed Limit hit (Diff: ${String.format('%.1f', drop)} over ${String.format('%.1f', hours)}h)"
-        log.warn "${device.displayName} Hourly Scan -> ${statusText}"
+        statusText = "Rejected - Speed Limit hit (Diff: ${fmt1(drop)} over ${fmt1(hours)}h)"
+        logDebug "scan: rejected ${rawMoist}, dropped ${fmt1(drop)} over ${fmt1(hours)}h"
     } else {
-        logDebug "Hourly Scan -> Success (${rawMoist})"
+        logDebug "scan: accepted ${rawMoist}"
     }
 
     state.history << [
@@ -192,7 +206,7 @@ def updateHistory() {
         def recent = state.history[-5..-1]
         def levels = recent*.rawMoisture
         if (recent.every { it.isSpeedOutlier ?: false } && (levels.max() - levels.min()) <= 2.0) {
-            log.warn "${device.displayName} Hourly Scan -> 5 steady readings after a drop. Starting new baseline at ${rawMoist}"
+            logWarn "held steady for 5 scans after a sudden drop, starting a new baseline at ${rawMoist}${state.fcSamples ? ' and clearing learned field capacity' : ''}"
             state.history = recent.collect { entry ->
                 entry + [isSpeedOutlier: false, statusText: "Accepted - New baseline after step change"]
             }
@@ -244,31 +258,30 @@ private Map windowRate(List points) {
     [rate: Math.max(0.0d, -cov / var), spanMs: spanMs]
 }
 
-private void saveCycleRate() {
+private String saveCycleRate() {
     Map cycle = windowRate(etWindow())
     if (cycle == null || cycle.spanMs < ET.minCycleMs || cycle.rate <= 0) {
-        logInfo "drying cycle was too short or flat to learn from. Keeping the saved ET rate."
-        return
+        String kept = state.savedEtRate != null ? "keeping saved ET ${fmt1(state.savedEtRate)}%/day" : "no saved ET rate yet"
+        return "Last cycle was too short or flat to learn from, ${kept}"
     }
     double days = cycle.spanMs / 86400000.0d
     if (state.savedEtRate == null) {
         state.savedEtRate = cycle.rate
         state.savedEtDays = days
-        logInfo "learned an ET rate of ${String.format('%.1f', cycle.rate)}%/day from ${String.format('%.1f', days)} days of drying"
-        return
+        return "Learned ET ${fmt1(cycle.rate)}%/day from ${fmt1(days)} days of drying"
     }
     double oldRate = state.savedEtRate as double
     double oldDays = state.savedEtDays != null ? state.savedEtDays as double : 1.0d
     state.savedEtRate = (oldRate * oldDays + cycle.rate * days) / (oldDays + days)
     state.savedEtDays = Math.min(ET.maxSavedDays as double, oldDays + days)
-    logInfo "this cycle dried at ${String.format('%.1f', cycle.rate)}%/day over ${String.format('%.1f', days)} days. Saved ET rate ${String.format('%.1f', oldRate)} -> ${String.format('%.1f', state.savedEtRate as double)}%/day"
+    "Last cycle dried ${fmt1(cycle.rate)}%/day over ${fmt1(days)} days, saved ET ${fmt1(oldRate)} → ${fmt1(state.savedEtRate)}%/day"
 }
 
 private void startDrainage(double moisture, long now) {
     state.wateredAt = now
     state.drainPeak = [time: now, moisture: moisture]
     state.drainSamples = [[time: now, moisture: moisture]]
-    logDebug "Drainage -> Started at ${moisture}"
+    logDebug "drain: started at ${moisture}"
 }
 
 private void trackDrainage(double moisture, long now) {
@@ -287,7 +300,7 @@ private void trackDrainage(double moisture, long now) {
     if (now - (state.drainPeak.time as long) < DRAIN.windowMs || !older) return
     def ref = older[-1]
     double ratePerHr = (ref.moisture - moisture) / ((now - (ref.time as long)) / 3600000.0d)
-    logDebug "Drainage -> ${moisture}, dropping ${String.format('%.2f', ratePerHr)}%/hr"
+    logDebug "drain: ${moisture}, dropping ${String.format('%.2f', ratePerHr)}%/hr"
     if (ratePerHr < DRAIN.endRatePerHr) finishDrainage(moisture, now)
 }
 
@@ -295,7 +308,7 @@ private void finishDrainage(double moisture, long now) {
     double drained = state.drainPeak.moisture - moisture
     long mins = Math.round((now - (state.wateredAt as long)) / 60000.0d)
     boolean timedOut = now - (state.wateredAt as long) >= DRAIN.maxMs
-    String drainedText = "drained ${String.format('%.1f', drained)} over ${mins} min"
+    String drainedText = "drained ${fmt1(drained)} over ${mins} min"
     String statusText = timedOut ? "Drainage timed out - ${drainedText}" : "Drainage complete - ${drainedText}"
 
     if (state.history == null) state.history = []
@@ -321,7 +334,7 @@ private void recordFcSample(double moisture, String drainedText) {
     String soaks = n == 1 ? "1 soak" : "${n} soaks"
     sendEvent(name: "learnedFieldCapacity", value: learned, unit: "%", descriptionText: "${device.displayName} learned field capacity is ${learned} from ${soaks} (shadow, not in use)")
     sendEvent(name: "debugFcSampleCount", value: n)
-    logInfo "soak detected, ${drainedText}, settled at ${moisture}. Learned field capacity now ${learned} from ${soaks} (your setting: ${pref('fieldCapacity')})"
+    logInfo "soak settled at ${moisture}, ${drainedText}. Learned field capacity now ${learned} from ${soaks} (setting: ${pref('fieldCapacity')})"
 }
 
 private void clearLearnedFc() {
@@ -348,8 +361,7 @@ def updatePlantCard(boolean isHourlyCron = false) {
     def lastValidPoint = validHistory ? validHistory[-1] : (state.history ? state.history[-1] : null)
 
     if (state.drainSamples == null && lastValidPoint != null && rawMoist > (lastValidPoint.rawMoisture + 5)) {
-        logInfo "watered. Calculating previous ET rate and resetting memory."
-        saveCycleRate()
+        logInfo "watered (${fmt1(lastValidPoint.rawMoisture)} → ${fmt1(rawMoist)}). ${saveCycleRate()}"
         state.history = []
         startDrainage(rawMoist, now)
     }
@@ -365,7 +377,7 @@ def updatePlantCard(boolean isHourlyCron = false) {
         // Clamp the visual value between 0% and 100% (so watering spikes don't break the ring SVG)
         displayPct = Math.max(0, Math.min(100, displayPct))
     }
-    sendEvent(name: "waterRemaining", value: displayPct, unit: "%")
+    sendEvent(name: "waterRemaining", value: displayPct, unit: "%", descriptionText: "${device.displayName} water remaining is ${displayPct}%")
 
     String daysLeft = "--"
     double dropPerDay = 0.0
@@ -378,10 +390,10 @@ def updatePlantCard(boolean isHourlyCron = false) {
         // Short windows swing with the day/night cycle, so lean on the saved rate until a full day is covered
         double w = Math.min(1.0d, live.spanMs / (ET.blendMs as double))
         dropPerDay = w * live.rate + (1.0d - w) * saved
-        etMath = "live ${String.format('%.1f', live.rate)} over ${String.format('%.1f', live.spanMs / 3600000.0d)}h, saved ${String.format('%.1f', saved)}, live weight ${Math.round(w * 100)}%"
+        etMath = "live ${fmt1(live.rate)} over ${fmt1(live.spanMs / 3600000.0d)}h, saved ${fmt1(saved)}, live weight ${Math.round(w * 100)}%"
     } else if (live != null) {
         dropPerDay = live.rate
-        etMath = "live ${String.format('%.1f', live.rate)} over ${String.format('%.1f', live.spanMs / 3600000.0d)}h, no saved rate yet"
+        etMath = "live ${fmt1(live.rate)} over ${fmt1(live.spanMs / 3600000.0d)}h, no saved rate yet"
     } else if (saved != null) {
         dropPerDay = saved
         etMath = "${windowPoints.size()}/${ET.minPoints} scans since the last gap or watering, using saved rate"
@@ -390,7 +402,7 @@ def updatePlantCard(boolean isHourlyCron = false) {
     }
 
     if (isHourlyCron) {
-        logDebug "ET Math -> ${String.format('%.1f', dropPerDay)}%/day (${etMath})"
+        logDebug "et: ${fmt1(dropPerDay)}%/day (${etMath})"
     }
 
     // Calculate estimated days remaining before hitting the Watering Threshold (Gas Light)
@@ -407,8 +419,9 @@ def updatePlantCard(boolean isHourlyCron = false) {
         daysLeft = "${Math.min(minDays, ET.maxDaysShown as int)}+"
     }
 
-    sendEvent(name: "etRate", value: new BigDecimal(dropPerDay).setScale(1, RoundingMode.HALF_UP), unit: "%/day")
-    sendEvent(name: "daysRemaining", value: daysLeft, unit: "days")
+    BigDecimal etRounded = new BigDecimal(dropPerDay).setScale(1, RoundingMode.HALF_UP)
+    sendEvent(name: "etRate", value: etRounded, unit: "%/day", descriptionText: "${device.displayName} ET rate is ${etRounded}%/day")
+    sendEvent(name: "daysRemaining", value: daysLeft, unit: "days", descriptionText: "${device.displayName} days remaining is ${daysLeft}")
 
     // UI Variables required by the HTML string...
     // Styling lives in dashboard CSS to keep plantCard under the 1024-char tile limit
@@ -418,7 +431,21 @@ def updatePlantCard(boolean isHourlyCron = false) {
     String battClass = battVal <= 20 ? "batt-low" : ""
     int battWidth = battVal
     boolean isDry = hasReading && rawMoist <= waterTarget
-    if (hasReading) sendEvent(name: "contact", value: isDry ? "open" : "closed")
+    if (hasReading) {
+        String contact = isDry ? "open" : "closed"
+        String needs = isDry ? "needs water" : "has enough water"
+        if (device.currentValue("contact") != contact) {
+            logInfo(isDry ? "needs water, moisture ${fmt1(rawMoist)} is at or below the watering threshold (${waterTarget})" : needs)
+        }
+        sendEvent(name: "contact", value: contact, descriptionText: "${device.displayName} ${needs}")
+    }
+
+    if (isHourlyCron && hasReading) {
+        String outlook = isDry ? "needs water" : (daysLeft == "--" || daysLeft == "0.0" ? "gathering data for days left" : "${daysLeft} days left")
+        String et = dropPerDay > 0 ? "ET ${fmt1(dropPerDay)}%/day, " : ""
+        String draining = state.drainSamples != null ? "draining, " : ""
+        logInfo "${draining}${fmt1(rawMoist)}% moisture, ${temp}°${location.temperatureScale}, battery ${battVal}%. ${et}${outlook}"
+    }
     String updated = "--"
     if (state.lastReportAt != null) {
         Date seen = new Date(state.lastReportAt as long)
@@ -453,7 +480,7 @@ private String formatDays(double days) {
 def logHistory() {
     def history = state.history ?: []
     if (!history) {
-        log.info "${device.displayName} history is empty"
+        logAlways "history is empty"
         return
     }
     String rows = history.collect { entry ->
@@ -461,18 +488,18 @@ def logHistory() {
         String readableDate = new Date(entry.time as long).format("MM/dd h:mm a")
         "<tr${color ? " style='color:${color}'" : ""}><td>${readableDate}</td><td>${entry.rawMoisture}</td><td>${entry.statusText ?: 'Success'}</td></tr>"
     }.join()
-    log.info "${device.displayName} history, oldest first:<table style='border-spacing:12px 0'><tr><th>Time</th><th>Moisture</th><th>Status</th></tr>${rows}</table>"
+    logAlways "history, oldest first:<table style='border-spacing:12px 0'><tr><th>Time</th><th>Moisture</th><th>Status</th></tr>${rows}</table>"
 }
 
 def updated() {
-    log.info "${device.displayName} preferences updated"
+    logAlways "preferences updated"
     int fc = pref("fieldCapacity").toInteger()
     int wt = pref("wateringThreshold").toInteger()
     int pwp = pref("permanentWiltingPoint").toInteger()
     if (pwp >= fc) {
-        log.warn "${device.displayName}: Permanent Wilting Point (${pwp}) must be below Field Capacity (${fc}). The ring gauge will only show full or empty until this is fixed."
+        logWarn "settings problem: Permanent Wilting Point (${pwp}) must be below Field Capacity (${fc}). The ring gauge will only show full or empty until this is fixed."
     } else if (wt <= pwp || wt >= fc) {
-        log.warn "${device.displayName}: Watering Threshold (${wt}) should be between Permanent Wilting Point (${pwp}) and Field Capacity (${fc})."
+        logWarn "settings problem: Watering Threshold (${wt}) should be between Permanent Wilting Point (${pwp}) and Field Capacity (${fc})."
     }
     if (state.moisture == null && device.currentValue("rawMoisture") != null) {
         state.moisture = device.currentValue("rawMoisture")
@@ -480,17 +507,17 @@ def updated() {
     ["historyTable", "soilMoisture", "rawMoisture"].each { device.deleteCurrentState(it) }
     ["moistOffset", "maxDaysLimit"].each { device.removeSetting(it) }
     scheduleHistory()
-    if (logEnable) runIn(86400, "logsOff")
+    if (logEnable) runIn(86400, "logsOff") else unschedule("logsOff")
     updatePlantCard()
 }
 
 def resetSensor(String resetCalibration = "No") {
-    log.info "${device.displayName} reset: clearing history, learned ET rate, and learned field capacity"
+    logAlways "reset: clearing history, learned ET rate, and learned field capacity"
     ["history", "savedEtRate", "savedEtDays", "wateredAt", "drainPeak", "drainSamples"].each { state.remove(it) }
     clearLearnedFc()
 
     if (resetCalibration == "Yes") {
-        log.info "${device.displayName} reset: restoring calibration settings to defaults"
+        logAlways "reset: restoring calibration settings to defaults"
         ["fieldCapacity", "wateringThreshold", "permanentWiltingPoint"].each {
             device.updateSetting(it, [value: DEFAULTS[it], type: "number"])
         }
