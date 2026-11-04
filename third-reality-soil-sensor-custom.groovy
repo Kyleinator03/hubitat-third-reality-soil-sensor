@@ -230,8 +230,18 @@ private Map windowRate(List points) {
     if (points.size() < ET.minPoints) return null
     long spanMs = (points[-1].time as long) - (points[0].time as long)
     if (spanMs <= 0) return null
-    double dropped = (points[0].rawMoisture as double) - (points[-1].rawMoisture as double)
-    [rate: Math.max(0.0d, dropped / (spanMs / 86400000.0d)), spanMs: spanMs]
+    long t0 = points[0].time as long
+    List<Double> days = points.collect { ((it.time as long) - t0) / 86400000.0d }
+    List<Double> moist = points.collect { it.rawMoisture as double }
+    double meanDay = days.sum() / days.size()
+    double meanMoist = moist.sum() / moist.size()
+    double cov = 0.0d
+    double var = 0.0d
+    days.eachWithIndex { double d, int i ->
+        cov += (d - meanDay) * (moist[i] - meanMoist)
+        var += (d - meanDay) * (d - meanDay)
+    }
+    [rate: Math.max(0.0d, -cov / var), spanMs: spanMs]
 }
 
 private void saveCycleRate() {
