@@ -1,7 +1,7 @@
 /**
  *  Third Reality Soil Moisture Sensor (with Smart Plant Card & ET Prediction)
  *
- *  Version: 1.4.0
+ *  Version: 1.5.0
  *  https://github.com/Kyleinator03/hubitat-third-reality-soil-sensor
  *  License: GPL-3.0
  */
@@ -39,9 +39,9 @@ metadata {
     }
 
     preferences {
-        input name: "fieldCapacity", type: "number", title: "Field Capacity (%)", description: "The maximum amount of water the soil holds against gravity. Set this to the sensor's moisture reading about an hour after a full soaking drain. (e.g., 72)", defaultValue: DEFAULTS.fieldCapacity, required: true
-        input name: "wateringThreshold", type: "number", title: "Watering Threshold (%)", description: "The moisture level where the plant actually needs to be watered. This triggers the 'WATER NOW' alert and is the target for the Days Left countdown. (e.g., 50)", defaultValue: DEFAULTS.wateringThreshold, required: true
-        input name: "permanentWiltingPoint", type: "number", title: "Permanent Wilting Point (%)", description: "The absolute zero limit where the plant can no longer extract water. This sets the 0% visual empty state of the blue ring gauge. (e.g., 30)", defaultValue: DEFAULTS.permanentWiltingPoint, required: true
+        input name: "fieldCapacity", type: "decimal", title: "Field Capacity (%)", description: "The maximum amount of water the soil holds against gravity. Set this to the sensor's moisture reading about an hour after a full soaking drain. (e.g., 72)", defaultValue: DEFAULTS.fieldCapacity, required: true
+        input name: "wateringThreshold", type: "decimal", title: "Watering Threshold (%)", description: "The moisture level where the plant actually needs to be watered. This triggers the 'WATER NOW' alert and is the target for the Days Left countdown. (e.g., 50)", defaultValue: DEFAULTS.wateringThreshold, required: true
+        input name: "permanentWiltingPoint", type: "decimal", title: "Permanent Wilting Point (%)", description: "The absolute zero limit where the plant can no longer extract water. This sets the 0% visual empty state of the blue ring gauge. (e.g., 30)", defaultValue: DEFAULTS.permanentWiltingPoint, required: true
         input name: "tempOffset", type: "decimal", title: "Temperature Offset (°)", description: "In your hub's temperature scale.", defaultValue: DEFAULTS.tempOffset, required: false
         input name: "txtEnable", type: "bool", title: "Enable descriptionText logging", description: "Hourly check-ins, waterings, drainage, and learned values.", defaultValue: true
         input name: "logEnable", type: "bool", title: "Enable debug logging", description: "Every reading, scan, and calculation. Turns itself off after 24 hours.", defaultValue: false
@@ -50,6 +50,10 @@ metadata {
 
 private pref(String name) {
     settings[name] != null ? settings[name] : DEFAULTS[name]
+}
+
+private BigDecimal decPref(String name) {
+    new BigDecimal(pref(name).toString())
 }
 
 private void logDebug(String msg) {
@@ -349,9 +353,9 @@ def updatePlantCard(boolean isHourlyCron = false) {
     def temp = device.currentValue("temperature") != null ? device.currentValue("temperature") : "--"
     int battVal = device.currentValue("battery") != null ? device.currentValue("battery").toInteger() : 100
     
-    int threshold = pref("permanentWiltingPoint").toInteger()
-    int capacity = pref("fieldCapacity").toInteger()
-    int waterTarget = pref("wateringThreshold").toInteger()
+    BigDecimal threshold = decPref("permanentWiltingPoint")
+    BigDecimal capacity = decPref("fieldCapacity")
+    BigDecimal waterTarget = decPref("wateringThreshold")
 
     long now = new Date().getTime()
     if (state.history == null) state.history = hasReading ? [[time: now, rawMoisture: rawMoist, statusText: "Success", isSpeedOutlier: false, isDraining: false]] : []
@@ -372,7 +376,7 @@ def updatePlantCard(boolean isHourlyCron = false) {
         displayPct = rawMoist > threshold ? 100 : 0
     } else if (rawMoist > threshold) {
         // Calculate percentage based on raw capacity instead of an arbitrary 100
-        displayPct = Math.round(((rawMoist - threshold) / (capacity - threshold).toDouble()) * 100).toInteger()
+        displayPct = Math.round(((rawMoist - threshold) / (capacity - threshold)) * 100).toInteger()
         
         // Clamp the visual value between 0% and 100% (so watering spikes don't break the ring SVG)
         displayPct = Math.max(0, Math.min(100, displayPct))
@@ -493,9 +497,9 @@ def logHistory() {
 
 def updated() {
     logAlways "preferences updated"
-    int fc = pref("fieldCapacity").toInteger()
-    int wt = pref("wateringThreshold").toInteger()
-    int pwp = pref("permanentWiltingPoint").toInteger()
+    BigDecimal fc = decPref("fieldCapacity")
+    BigDecimal wt = decPref("wateringThreshold")
+    BigDecimal pwp = decPref("permanentWiltingPoint")
     if (pwp >= fc) {
         logWarn "settings problem: Permanent Wilting Point (${pwp}) must be below Field Capacity (${fc}). The ring gauge will only show full or empty until this is fixed."
     } else if (wt <= pwp || wt >= fc) {
@@ -518,10 +522,9 @@ def resetSensor(String resetCalibration = "No") {
 
     if (resetCalibration == "Yes") {
         logAlways "reset: restoring calibration settings to defaults"
-        ["fieldCapacity", "wateringThreshold", "permanentWiltingPoint"].each {
-            device.updateSetting(it, [value: DEFAULTS[it], type: "number"])
+        ["fieldCapacity", "wateringThreshold", "permanentWiltingPoint", "tempOffset"].each {
+            device.updateSetting(it, [value: DEFAULTS[it], type: "decimal"])
         }
-        device.updateSetting("tempOffset", [value: DEFAULTS.tempOffset, type: "decimal"])
     }
 
     // Deferred so updatePlantCard sees the restored settings rather than this execution's cached copy
