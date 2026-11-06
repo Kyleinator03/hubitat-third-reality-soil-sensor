@@ -1,7 +1,7 @@
 /**
  *  Third Reality Soil Moisture Sensor (with Smart Plant Card & ET Prediction)
  *
- *  Version: 1.5.0
+ *  Version: 1.6.0
  *  https://github.com/Kyleinator03/hubitat-third-reality-soil-sensor
  *  License: GPL-3.0
  */
@@ -9,7 +9,7 @@
 import groovy.transform.Field
 import java.math.RoundingMode
 
-@Field static final Map DEFAULTS = [fieldCapacity: 75, wateringThreshold: 50, permanentWiltingPoint: 30, tempOffset: 0.0]
+@Field static final Map DEFAULTS = [fieldCapacity: 75, wateringThreshold: 50, tempOffset: 0.0]
 @Field static final Map DRAIN = [windowMs: 1800000L, endRatePerHr: 1.0, maxMs: 21600000L, soakMinDrop: 2.0, fcSamplesKept: 5]
 @Field static final Map ET = [minPoints: 5, gapMs: 10800000L, blendMs: 86400000L, minCycleMs: 43200000L, maxSavedDays: 7.0, stepPct: 0.15, maxDaysShown: 99]
 
@@ -32,7 +32,7 @@ metadata {
         attribute "debugFcSampleCount", "number"
 
         command "logHistory"
-        command "resetSensor", [[name: "Also reset calibration settings?", type: "ENUM", constraints: ["No", "Yes"], description: "Yes also restores Field Capacity, Watering Threshold, Wilting Point, and the temperature offset to their defaults"]]
+        command "resetSensor", [[name: "Also reset calibration settings?", type: "ENUM", constraints: ["No", "Yes"], description: "Yes also restores Field Capacity, Watering Threshold, and the temperature offset to their defaults"]]
 
         fingerprint profileId: "0104", inClusters: "0000,0001,0003,0402,0405", outClusters: "0019", manufacturer: "Third Reality, Inc", model: "3RSM0147Z", deviceJoinName: "Third Reality Soil Sensor"
         fingerprint profileId: "0104", inClusters: "0000,0001,0003,0402,0405", outClusters: "0019", manufacturer: "Third Reality, Inc", model: "3RSM0347Z", deviceJoinName: "Third Reality Soil Sensor Gen2"
@@ -40,8 +40,7 @@ metadata {
 
     preferences {
         input name: "fieldCapacity", type: "decimal", title: "Field Capacity (%)", description: "The maximum amount of water the soil holds against gravity. Set this to the sensor's moisture reading about an hour after a full soaking drain. (e.g., 72)", defaultValue: DEFAULTS.fieldCapacity, required: true
-        input name: "wateringThreshold", type: "decimal", title: "Watering Threshold (%)", description: "The moisture level where the plant actually needs to be watered. This triggers the 'WATER NOW' alert and is the target for the Days Left countdown. (e.g., 50)", defaultValue: DEFAULTS.wateringThreshold, required: true
-        input name: "permanentWiltingPoint", type: "decimal", title: "Permanent Wilting Point (%)", description: "The absolute zero limit where the plant can no longer extract water. This sets the 0% visual empty state of the blue ring gauge. (e.g., 30)", defaultValue: DEFAULTS.permanentWiltingPoint, required: true
+        input name: "wateringThreshold", type: "decimal", title: "Watering Threshold (%)", description: "The moisture level where the plant actually needs to be watered. This is the empty point of the ring, triggers the 'WATER NOW' alert, and is the target for the Days Left countdown. (e.g., 50)", defaultValue: DEFAULTS.wateringThreshold, required: true
         input name: "tempOffset", type: "decimal", title: "Temperature Offset (°)", description: "In your hub's temperature scale.", defaultValue: DEFAULTS.tempOffset, required: false
         input name: "txtEnable", type: "bool", title: "Enable descriptionText logging", description: "Hourly check-ins, waterings, drainage, and learned values.", defaultValue: true
         input name: "logEnable", type: "bool", title: "Enable debug logging", description: "Every reading, scan, and calculation. Turns itself off after 24 hours.", defaultValue: false
@@ -353,7 +352,6 @@ def updatePlantCard(boolean isHourlyCron = false) {
     def temp = device.currentValue("temperature") != null ? device.currentValue("temperature") : "--"
     int battVal = device.currentValue("battery") != null ? device.currentValue("battery").toInteger() : 100
     
-    BigDecimal threshold = decPref("permanentWiltingPoint")
     BigDecimal capacity = decPref("fieldCapacity")
     BigDecimal waterTarget = decPref("wateringThreshold")
 
@@ -370,15 +368,12 @@ def updatePlantCard(boolean isHourlyCron = false) {
         startDrainage(rawMoist, now)
     }
 
-    // Visual ring gauge maps the distance between Wilting Point (empty) and Field Capacity (full)
     int displayPct = 0
-    if (capacity <= threshold) {
-        displayPct = rawMoist > threshold ? 100 : 0
-    } else if (rawMoist > threshold) {
-        // Calculate percentage based on raw capacity instead of an arbitrary 100
-        displayPct = Math.round(((rawMoist - threshold) / (capacity - threshold)) * 100).toInteger()
-        
-        // Clamp the visual value between 0% and 100% (so watering spikes don't break the ring SVG)
+    if (capacity <= waterTarget) {
+        displayPct = rawMoist > waterTarget ? 100 : 0
+    } else if (rawMoist > waterTarget) {
+        displayPct = Math.round(((rawMoist - waterTarget) / (capacity - waterTarget)) * 100).toInteger()
+        // Clamped so readings above field capacity right after watering don't overflow the ring
         displayPct = Math.max(0, Math.min(100, displayPct))
     }
     sendEvent(name: "waterRemaining", value: displayPct, unit: "%", descriptionText: "${device.displayName} water remaining is ${displayPct}%")
@@ -499,17 +494,14 @@ def updated() {
     logAlways "preferences updated"
     BigDecimal fc = decPref("fieldCapacity")
     BigDecimal wt = decPref("wateringThreshold")
-    BigDecimal pwp = decPref("permanentWiltingPoint")
-    if (pwp >= fc) {
-        logWarn "settings problem: Permanent Wilting Point (${pwp}) must be below Field Capacity (${fc}). The ring gauge will only show full or empty until this is fixed."
-    } else if (wt <= pwp || wt >= fc) {
-        logWarn "settings problem: Watering Threshold (${wt}) should be between Permanent Wilting Point (${pwp}) and Field Capacity (${fc})."
+    if (wt >= fc) {
+        logWarn "settings problem: Watering Threshold (${wt}) must be below Field Capacity (${fc}). The ring gauge will only show full or empty until this is fixed."
     }
     if (state.moisture == null && device.currentValue("rawMoisture") != null) {
         state.moisture = device.currentValue("rawMoisture")
     }
     ["historyTable", "soilMoisture", "rawMoisture"].each { device.deleteCurrentState(it) }
-    ["moistOffset", "maxDaysLimit"].each { device.removeSetting(it) }
+    ["moistOffset", "maxDaysLimit", "permanentWiltingPoint"].each { device.removeSetting(it) }
     scheduleHistory()
     if (logEnable) runIn(86400, "logsOff") else unschedule("logsOff")
     updatePlantCard()
@@ -522,7 +514,7 @@ def resetSensor(String resetCalibration = "No") {
 
     if (resetCalibration == "Yes") {
         logAlways "reset: restoring calibration settings to defaults"
-        ["fieldCapacity", "wateringThreshold", "permanentWiltingPoint", "tempOffset"].each {
+        ["fieldCapacity", "wateringThreshold", "tempOffset"].each {
             device.updateSetting(it, [value: DEFAULTS[it], type: "decimal"])
         }
     }
