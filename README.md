@@ -2,7 +2,7 @@
 
 A Hubitat driver for the Third Reality Zigbee soil moisture sensor, models 3RSM0147Z and 3RSM0347Z. It reports soil moisture, temperature, and battery level. It also learns how fast your soil dries and estimates how many days are left until the plant needs water.
 
-The driver builds a **Plant Card** for Hubitat dashboards. The card shows a ring for how much usable water is left in the soil, plus the days remaining, battery, moisture, temperature, and when the sensor last reported. When the plant needs water, the card switches to a "WATER NOW" alert.
+The driver builds a **Plant Card** for Hubitat dashboards. The card shows a ring for how much water is left before the plant needs watering, plus the days remaining, battery, moisture, temperature, and when the sensor last reported. When the plant needs water, the card switches to a "WATER NOW" alert.
 
 ## What's in this repo
 
@@ -27,13 +27,12 @@ The driver builds a **Plant Card** for Hubitat dashboards. The card shows a ring
 
 ## 2. Calibrate the moisture settings
 
-The ring and the days-left estimate use three moisture levels, all compared against the sensor's moisture reading (**humidity** on the device page). If you have an analog moisture meter you trust, use it to pick these levels: the two devices measure differently and won't show the same numbers, but you can note what this sensor reads when your meter says the soil is wet or dry.
+The ring and the days-left estimate use two moisture levels, both compared against the sensor's moisture reading (**humidity** on the device page). If you have an analog moisture meter you trust, use it to pick these levels: the two devices measure differently and won't show the same numbers, but you can note what this sensor reads when your meter says the soil is wet or dry.
 
 | Setting | What it means | How to find it |
 |---|---|---|
 | **Field Capacity** | The wettest the soil stays after draining. This is a full ring. | Water the plant thoroughly, let it drain for about an hour, then read the moisture. |
-| **Watering Threshold** | The level where the plant should be watered. The card shows "WATER NOW" at or below it. | Read the moisture on a day when you'd normally water, or when your analog meter says the plant needs water. |
-| **Permanent Wilting Point** | The level where the plant can no longer take up water. This is an empty ring. | Set it somewhat below the watering threshold. |
+| **Watering Threshold** | The level where the plant should be watered. This is an empty ring, and the card shows "WATER NOW" at or below it. | Read the moisture on a day when you'd normally water, or when your analog meter says the plant needs water. |
 
 **Temperature Offset** shifts the temperature if your sensor reads high or low. Temperature follows your hub's Celsius or Fahrenheit setting, and the offset is in the same scale.
 
@@ -60,7 +59,7 @@ The last block in `dashboard.css` sets a dark page background to match the cards
 The driver learns how fast each pot dries. When you move a sensor to a different plant or pot, clear what it learned:
 
 1. Put the sensor in the new pot first.
-2. On the device page, click **Reset Sensor**. Leave the option at **No** to keep your calibration settings, or pick **Yes** to put Field Capacity, Watering Threshold, Wilting Point, and the temperature offset back to their defaults.
+2. On the device page, click **Reset Sensor**. Leave the option at **No** to keep your calibration settings, or pick **Yes** to put Field Capacity, Watering Threshold, and the temperature offset back to their defaults.
 
 The reset clears the hourly history and the learned drying rate. The card shows **CALC** again until it has about five hours of new readings. The first new history point comes from the current reading, so move the sensor before resetting, not after. A new pot or soil mix usually needs recalibrating anyway (see step 2).
 
