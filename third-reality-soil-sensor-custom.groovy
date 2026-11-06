@@ -1,7 +1,7 @@
 /**
  *  Third Reality Soil Moisture Sensor (with Smart Plant Card & ET Prediction)
  *
- *  Version: 1.6.0
+ *  Version: 1.7.0
  *  https://github.com/Kyleinator03/hubitat-third-reality-soil-sensor
  *  License: GPL-3.0
  */
@@ -10,7 +10,7 @@ import groovy.transform.Field
 import java.math.RoundingMode
 
 @Field static final Map DEFAULTS = [fieldCapacity: 75, wateringThreshold: 50, tempOffset: 0.0]
-@Field static final Map DRAIN = [windowMs: 1800000L, endRatePerHr: 1.0, maxMs: 21600000L, soakMinDrop: 2.0, fcSamplesKept: 5]
+@Field static final Map DRAIN = [windowMs: 1800000L, endRatePerHr: 1.0, maxMs: 21600000L, soakMinDrop: 2.0, soakPeak: 95.0, fcSamplesKept: 5, peakQuietSec: 120, sensorMax: 99.9]
 @Field static final Map ET = [minPoints: 5, gapMs: 10800000L, blendMs: 86400000L, minCycleMs: 43200000L, maxSavedDays: 7.0, stepPct: 0.15, maxDaysShown: 99]
 
 metadata {
@@ -285,6 +285,24 @@ private void startDrainage(double moisture, long now) {
     state.drainPeak = [time: now, moisture: moisture]
     state.drainSamples = [[time: now, moisture: moisture]]
     logDebug "drain: started at ${moisture}"
+    waitForPeak(moisture)
+}
+
+// Announced once the reading tops out, so multi-pour waterings report the real peak rather than the first rise
+private void waitForPeak(double moisture) {
+    if (moisture >= DRAIN.sensorMax) {
+        announceWatering()
+    } else {
+        runIn(DRAIN.peakQuietSec, "announceWatering")
+    }
+}
+
+def announceWatering() {
+    unschedule("announceWatering")
+    if (state.wateredFrom == null) return
+    double peak = state.drainPeak?.moisture != null ? state.drainPeak.moisture as double : state.moisture.toDouble()
+    logInfo "watered (${fmt1(state.wateredFrom)} → ${fmt1(peak)}). ${state.wateredNote}"
+    ["wateredFrom", "wateredNote"].each { state.remove(it) }
 }
 
 private void trackDrainage(double moisture, long now) {
@@ -294,6 +312,7 @@ private void trackDrainage(double moisture, long now) {
     }
     if (moisture > state.drainPeak.moisture) {
         state.drainPeak = [time: now, moisture: moisture]
+        if (state.wateredFrom != null) waitForPeak(moisture)
     }
     def samples = state.drainSamples + [[time: now, moisture: moisture]]
     long windowStart = now - DRAIN.windowMs
@@ -308,7 +327,9 @@ private void trackDrainage(double moisture, long now) {
 }
 
 private void finishDrainage(double moisture, long now) {
-    double drained = state.drainPeak.moisture - moisture
+    announceWatering()
+    double peak = state.drainPeak.moisture as double
+    double drained = peak - moisture
     long mins = Math.round((now - (state.wateredAt as long)) / 60000.0d)
     boolean timedOut = now - (state.wateredAt as long) >= DRAIN.maxMs
     String drainedText = "drained ${fmt1(drained)} over ${mins} min"
@@ -320,6 +341,8 @@ private void finishDrainage(double moisture, long now) {
 
     if (timedOut) {
         logInfo "drainage still going after ${mins} min, no field capacity sample taken"
+    } else if (drained < DRAIN.soakMinDrop && peak >= DRAIN.soakPeak) {
+        logInfo "soaked to ${fmt1(peak)} but only ${drainedText}, so water may be pooled at the sensor. Try wiggling it. No field capacity sample taken"
     } else if (drained < DRAIN.soakMinDrop) {
         logInfo "drainage done, ${drainedText}. Looks like a partial watering, no field capacity sample taken"
     } else {
@@ -363,7 +386,8 @@ def updatePlantCard(boolean isHourlyCron = false) {
     def lastValidPoint = validHistory ? validHistory[-1] : (state.history ? state.history[-1] : null)
 
     if (state.drainSamples == null && lastValidPoint != null && rawMoist > (lastValidPoint.rawMoisture + 5)) {
-        logInfo "watered (${fmt1(lastValidPoint.rawMoisture)} → ${fmt1(rawMoist)}). ${saveCycleRate()}"
+        state.wateredFrom = lastValidPoint.rawMoisture
+        state.wateredNote = saveCycleRate()
         state.history = []
         startDrainage(rawMoist, now)
     }
@@ -509,7 +533,8 @@ def updated() {
 
 def resetSensor(String resetCalibration = "No") {
     logAlways "reset: clearing history, learned ET rate, and learned field capacity"
-    ["history", "savedEtRate", "savedEtDays", "wateredAt", "drainPeak", "drainSamples"].each { state.remove(it) }
+    ["history", "savedEtRate", "savedEtDays", "wateredAt", "drainPeak", "drainSamples", "wateredFrom", "wateredNote"].each { state.remove(it) }
+    unschedule("announceWatering")
     clearLearnedFc()
 
     if (resetCalibration == "Yes") {
