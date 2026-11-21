@@ -1,7 +1,7 @@
 /**
  *  Third Reality Soil Moisture Sensor (with Smart Plant Card & ET Prediction)
  *
- *  Version: 1.8.0
+ *  Version: 1.8.1
  *  https://github.com/Kyleinator03/hubitat-third-reality-soil-sensor
  *  License: GPL-3.0
  */
@@ -10,7 +10,7 @@ import groovy.transform.Field
 import java.math.RoundingMode
 
 @Field static final Map DEFAULTS = [fieldCapacity: 90, wateringThreshold: 50, tempOffset: 0.0]
-@Field static final Map SETTLE = [windowMs: 21600000L, jitterMs: 600000L, maxMs: 172800000L, ceiling: 95.0, fcSlack: 1.0, etMultiple: 3.0, minLimit: 3.0, noSavedLimit: 6.0, soakMinDrop: 2.0, fcSamplesKept: 5, peakQuietSec: 120, sensorMax: 99.9]
+@Field static final Map SETTLE = [windowMs: 21600000L, jitterMs: 600000L, watchMs: 86400000L, poolDropPerHour: 1.0, ceiling: 95.0, etMultiple: 3.0, minLimit: 3.0, noSavedLimit: 6.0, peakQuietSec: 120, sensorMax: 99.9]
 @Field static final Map ET = [minPoints: 5, gapMs: 10800000L, minCycleMs: 43200000L, maxSavedDays: 7.0, stepPct: 0.15, maxDaysShown: 99]
 
 metadata {
@@ -28,17 +28,15 @@ metadata {
         attribute "plantCard", "string"
         attribute "etRate", "number"
         attribute "healthStatus", "enum", ["online", "offline"]
-        attribute "learnedFieldCapacity", "number"
 
         command "logHistory"
-        command "resetSensor", [[name: "Also reset calibration settings?", type: "ENUM", constraints: ["No", "Yes"], description: "Yes also clears Field Capacity so it's learned again, and restores Watering Threshold and the temperature offset to their defaults"]]
+        command "resetSensor", [[name: "Also reset calibration settings?", type: "ENUM", constraints: ["No", "Yes"], description: "Yes also restores Watering Threshold and the temperature offset to their defaults"]]
 
         fingerprint profileId: "0104", inClusters: "0000,0001,0003,0402,0405", outClusters: "0019", manufacturer: "Third Reality, Inc", model: "3RSM0147Z", deviceJoinName: "Third Reality Soil Sensor"
         fingerprint profileId: "0104", inClusters: "0000,0001,0003,0402,0405", outClusters: "0019", manufacturer: "Third Reality, Inc", model: "3RSM0347Z", deviceJoinName: "Third Reality Soil Sensor Gen2"
     }
 
     preferences {
-        input name: "fieldCapacity", type: "decimal", title: "Field Capacity (%)", description: "Leave blank to learn it from your waterings. The wettest the soil stays after draining, which is a full ring. Enter a value only to override what's learned.", required: false
         input name: "wateringThreshold", type: "decimal", title: "Watering Threshold (%)", description: "The moisture level where the plant actually needs to be watered. This is the empty point of the ring, triggers the 'WATER NOW' alert, and is the target for the Days Left countdown. (e.g., 50)", defaultValue: DEFAULTS.wateringThreshold, required: true
         input name: "tempOffset", type: "decimal", title: "Temperature Offset (°)", description: "In your hub's temperature scale.", defaultValue: DEFAULTS.tempOffset, required: false
         input name: "txtEnable", type: "bool", title: "Enable descriptionText logging", description: "Hourly check-ins, waterings, settling, and learned values.", defaultValue: true
@@ -54,20 +52,9 @@ private BigDecimal decPref(String name) {
     new BigDecimal(pref(name).toString())
 }
 
-private BigDecimal learnedFc() {
-    List sorted = (state.fcSamples ?: []).collect { it as double }.sort()
-    int n = sorted.size()
-    if (n == 0) return null
-    double median = n % 2 ? sorted[n.intdiv(2)] : (sorted[n.intdiv(2) - 1] + sorted[n.intdiv(2)]) / 2.0
-    new BigDecimal(median).setScale(1, RoundingMode.HALF_UP)
-}
-
-private boolean fcKnown() {
-    settings.fieldCapacity != null || state.fcSamples
-}
-
-private BigDecimal fcInUse() {
-    settings.fieldCapacity != null ? new BigDecimal(settings.fieldCapacity.toString()) : (learnedFc() ?: new BigDecimal(DEFAULTS.fieldCapacity.toString()))
+// Field capacity is where the last watering settled, which is a full ring
+private BigDecimal fieldCapacity() {
+    new BigDecimal((state.fieldCapacity != null ? state.fieldCapacity : DEFAULTS.fieldCapacity).toString())
 }
 
 private void logDebug(String msg) {
@@ -175,6 +162,7 @@ def updateHistory() {
 
     if (state.history == null) state.history = []
     if (state.settleModel == null) migrateToSettling()
+    checkPooledDrain(rawMoist, now)
 
     if (state.settling) {
         state.history << [time: now, rawMoisture: rawMoist, statusText: "Settling", isSpeedOutlier: false, isDraining: true]
@@ -222,11 +210,11 @@ def updateHistory() {
         def recent = state.history[-5..-1]
         def levels = recent*.rawMoisture
         if (recent.every { it.isSpeedOutlier ?: false } && (levels.max() - levels.min()) <= 2.0) {
-            logWarn "held steady for 5 scans after a sudden drop, starting a new baseline at ${rawMoist}${state.fcSamples ? ' and clearing learned field capacity' : ''}"
+            logWarn "held steady for 5 scans after a sudden drop, starting a new baseline at ${rawMoist}"
             state.history = recent.collect { entry ->
                 entry + [isSpeedOutlier: false, statusText: "Accepted - New baseline after step change"]
             }
-            clearLearnedFc()
+            state.remove("fieldCapacity")
         }
     }
 
@@ -297,7 +285,7 @@ private void startSettling(double moisture, long now) {
     state.wateredAt = now
     state.drainPeak = [time: now, moisture: moisture]
     state.settling = true
-    ["settleWarned", "skipFcSample"].each { state.remove(it) }
+    state.remove("settleWarned")
     logDebug "settle: started at ${moisture}"
     waitForPeak(moisture)
 }
@@ -325,13 +313,33 @@ private void trackPeak(double moisture, long now) {
     if (state.wateredFrom != null) waitForPeak(moisture)
 }
 
-private Map settleWindow(List rows, double limit, Double cap) {
+// Within a day of watering, a fast drop means water had pooled at the sensor, so nothing before it counts toward ET or the ring
+private void checkPooledDrain(double rawMoist, long now) {
+    if (state.wateredAt == null || !state.history) return
+    long elapsed = now - (state.wateredAt as long)
+    if (elapsed >= SETTLE.watchMs) return
+    Map last = state.history[-1]
+    double hours = Math.max(1.0d, (now - (last.time as long)) / 3600000.0d)
+    double drop = (last.rawMoisture as double) - rawMoist
+    if (drop / hours <= SETTLE.poolDropPerHour) return
+    String msg = "dropped ${fmt1(drop)} in ${fmt1(hours)}h, ${Math.round(elapsed / 3600000.0d)}h after watering"
+    if (state.settling) {
+        logDebug "settle: ${msg}, restarting the settle check from ${rawMoist}"
+    } else {
+        logInfo "${msg}. Water had pooled at the sensor, so the readings since watering are thrown away and settling starts over"
+    }
+    state.history = []
+    state.settling = true
+    state.remove("fieldCapacity")
+}
+
+private Map settleWindow(List rows, double limit) {
     for (int end = 0; end < rows.size(); end++) {
         long endTime = rows[end].time as long
         int start = rows.findIndexOf { (it.time as long) >= endTime - SETTLE.windowMs }
         List stretch = rows[start..end]
         if (endTime - (stretch[0].time as long) < SETTLE.windowMs - SETTLE.jitterMs) continue
-        boolean level = stretch.every { double m = it.rawMoisture as double; m < SETTLE.ceiling && (cap == null || m <= cap) }
+        boolean level = stretch.every { (it.rawMoisture as double) < SETTLE.ceiling }
         if (!level) continue
         Map fit = windowRate(stretch)
         if (fit != null && fit.rate <= limit) return [start: start, end: end, rate: fit.rate]
@@ -344,25 +352,22 @@ private void checkSettled(long now) {
     Double saved = state.savedEtRate != null ? state.savedEtRate as double : null
     double limit = saved != null ? Math.max(SETTLE.etMultiple * saved, SETTLE.minLimit as double) : SETTLE.noSavedLimit as double
     long elapsed = now - (state.wateredAt as long)
-    boolean timedOut = elapsed >= SETTLE.maxMs
-    // Past the timeout the field capacity check is dropped, so a capacity that has risen can still be learned
-    Double cap = fcKnown() && !timedOut ? (fcInUse() + SETTLE.fcSlack) as double : null
-    Map found = settleWindow(rows, limit, cap)
+    Map found = settleWindow(rows, limit)
     if (found != null) {
-        finishSettling(found, timedOut && fcKnown())
+        finishSettling(found)
         return
     }
-    logDebug "settle: not yet, needs 6h below ${fmt1(cap != null ? cap : SETTLE.ceiling)} dropping under ${fmt1(limit)}%/day"
-    if (timedOut && !state.settleWarned) {
+    logDebug "settle: not yet, needs 6h below ${fmt1(SETTLE.ceiling)} dropping under ${fmt1(limit)}%/day"
+    if (elapsed >= SETTLE.watchMs && !state.settleWarned) {
         state.settleWarned = true
         logWarn "still not settled ${Math.round(elapsed / 3600000.0d)}h after watering (reading ${fmt1(rows[-1].rawMoisture)}). Water may be pooled at the sensor, so try wiggling it. Days left uses the saved drying rate until it settles."
     }
 }
 
-private void finishSettling(Map found, boolean viaTimeout) {
+private void finishSettling(Map found) {
     announceWatering()
     List rows = state.history
-    double sample = rows[found.start].rawMoisture as double
+    double settledAt = rows[found.end].rawMoisture as double
     double peak = Math.max(state.drainPeak?.moisture != null ? state.drainPeak.moisture as double : 0.0d, rows*.rawMoisture.max() as double)
     long hrs = Math.round(((rows[found.end].time as long) - (state.wateredAt as long)) / 3600000.0d)
     List updatedRows = []
@@ -370,35 +375,11 @@ private void finishSettling(Map found, boolean viaTimeout) {
         updatedRows << (i < found.end ? row : row + [isDraining: false, statusText: i == found.end ? "Settled - measuring ET from here" : "Success"])
     }
     state.history = updatedRows
+    state.fieldCapacity = settledAt
 
-    double dropped = peak - sample
-    String settled = "soil settled at ${fmt1(sample)}, ${hrs}h after watering (dropped ${fmt1(dropped)} from the ${fmt1(peak)} peak). Measuring ET from here."
-    if (state.skipFcSample) {
-        logInfo settled
-    } else if (dropped < SETTLE.soakMinDrop) {
-        logInfo "${settled} Looks like a partial watering, no field capacity sample"
-    } else {
-        recordFcSample(sample, settled)
-    }
-    if (viaTimeout && settings.fieldCapacity != null) {
-        logWarn "only settled after ignoring the Field Capacity setting (${settings.fieldCapacity}). It may be set too low, or clear it to let the driver learn it"
-    }
-    ["wateredAt", "drainPeak", "settling", "settleWarned", "skipFcSample"].each { state.remove(it) }
-}
-
-private void recordFcSample(double moisture, String settled) {
-    state.fcSamples = ((state.fcSamples ?: []) + [moisture]).takeRight(SETTLE.fcSamplesKept)
-    BigDecimal learned = learnedFc()
-    int n = state.fcSamples.size()
-    String soaks = n == 1 ? "1 soak" : "${n} soaks"
-    sendEvent(name: "learnedFieldCapacity", value: learned, unit: "%", descriptionText: "${device.displayName} learned field capacity is ${learned} from ${soaks}")
-    String use = settings.fieldCapacity != null ? "your setting of ${settings.fieldCapacity} is in use" : "in use"
-    logInfo "${settled} Learned field capacity ${learned} from ${soaks} (${use})"
-}
-
-private void clearLearnedFc() {
-    state.remove("fcSamples")
-    device.deleteCurrentState("learnedFieldCapacity")
+    logInfo "soil settled at ${fmt1(settledAt)}, ${hrs}h after watering (dropped ${fmt1(peak - settledAt)} from the ${fmt1(peak)} peak). Measuring ET from here."
+    // wateredAt and drainPeak stay until the next watering, for the pooled-drain watch and a re-settle's peak
+    ["settling", "settleWarned"].each { state.remove(it) }
 }
 
 // One-time upgrade from the 1.7 drainage detector, so a watering still in the history is re-judged by the settle check
@@ -412,16 +393,10 @@ private void migrateToSettling() {
     if (!midDrain) {
         state.wateredAt = rows[0].time
         state.drainPeak = [time: rows[0].time, moisture: rows*.rawMoisture.max()]
-        if (rows.any { oldFcSampled(it.statusText) }) state.skipFcSample = true
     }
     state.history = rows.collect { it + [isDraining: true, isSpeedOutlier: false, statusText: "Settling"] }
     state.settling = true
     logInfo "upgraded: re-checking the last watering with the new settle check"
-}
-
-private boolean oldFcSampled(String text) {
-    if (!(text ?: "").startsWith("Drainage complete - drained ")) return false
-    (text.tokenize(" ")[4] as double) >= SETTLE.soakMinDrop
 }
 
 def updatePlantCard(boolean isHourlyCron = false) {
@@ -432,7 +407,7 @@ def updatePlantCard(boolean isHourlyCron = false) {
     def temp = device.currentValue("temperature") != null ? device.currentValue("temperature") : "--"
     int battVal = device.currentValue("battery") != null ? device.currentValue("battery").toInteger() : 100
     
-    BigDecimal capacity = fcInUse()
+    BigDecimal fc = fieldCapacity()
     BigDecimal waterTarget = decPref("wateringThreshold")
 
     long now = new Date().getTime()
@@ -451,10 +426,12 @@ def updatePlantCard(boolean isHourlyCron = false) {
     boolean settling = state.settling == true
 
     int displayPct = 0
-    if (capacity <= waterTarget) {
+    if (settling && rawMoist > waterTarget) {
+        displayPct = 100
+    } else if (fc <= waterTarget) {
         displayPct = rawMoist > waterTarget ? 100 : 0
     } else if (rawMoist > waterTarget) {
-        displayPct = Math.round(((rawMoist - waterTarget) / (capacity - waterTarget)) * 100).toInteger()
+        displayPct = Math.round(((rawMoist - waterTarget) / (fc - waterTarget)) * 100).toInteger()
         // Clamped so readings above field capacity right after watering don't overflow the ring
         displayPct = Math.max(0, Math.min(100, displayPct))
     }
@@ -496,7 +473,7 @@ def updatePlantCard(boolean isHourlyCron = false) {
         daysLeft = "--"
     } else if (dropPerDay > 0 && rawMoist > waterTarget) {
         // Water above field capacity is still draining away, so it doesn't buy the plant extra days
-        double from = settling ? Math.min(rawMoist, capacity as double) : rawMoist
+        double from = settling ? Math.min(rawMoist, fc as double) : rawMoist
         daysLeft = formatDays(Math.max(0.0d, from - (waterTarget as double)) / dropPerDay)
     } else if (rawMoist <= waterTarget) {
         daysLeft = "0.0"
@@ -581,30 +558,33 @@ def logHistory() {
 
 def updated() {
     logAlways "preferences updated"
-    BigDecimal fc = fcInUse()
+    // Upgrading from 1.8.0: the field capacity setting or last sample stays in use until the next watering settles
+    if (state.fieldCapacity == null && (settings.fieldCapacity != null || state.fcSamples)) {
+        state.fieldCapacity = settings.fieldCapacity != null ? settings.fieldCapacity : state.fcSamples[-1]
+    }
+    BigDecimal fc = fieldCapacity()
     BigDecimal wt = decPref("wateringThreshold")
     if (wt >= fc) {
-        logWarn "settings problem: Watering Threshold (${wt}) must be below Field Capacity (${fc}). The ring gauge will only show full or empty until this is fixed."
+        logWarn "settings problem: Watering Threshold (${wt}) must be below field capacity, where the soil settles after watering (${fc}). The ring gauge will only show full or empty until this is fixed."
     }
     if (state.moisture == null && device.currentValue("rawMoisture") != null) {
         state.moisture = device.currentValue("rawMoisture")
     }
-    ["historyTable", "soilMoisture", "rawMoisture"].each { device.deleteCurrentState(it) }
-    ["moistOffset", "maxDaysLimit", "permanentWiltingPoint"].each { device.removeSetting(it) }
+    ["historyTable", "soilMoisture", "rawMoisture", "learnedFieldCapacity"].each { device.deleteCurrentState(it) }
+    ["moistOffset", "maxDaysLimit", "permanentWiltingPoint", "fieldCapacity"].each { device.removeSetting(it) }
+    ["fcSamples", "skipFcSample"].each { state.remove(it) }
     scheduleHistory()
     if (logEnable) runIn(86400, "logsOff") else unschedule("logsOff")
     updatePlantCard()
 }
 
 def resetSensor(String resetCalibration = "No") {
-    logAlways "reset: clearing history, learned ET rate, and learned field capacity"
-    ["history", "savedEtRate", "savedEtDays", "wateredAt", "drainPeak", "settling", "settleWarned", "skipFcSample", "wateredFrom", "wateredNote"].each { state.remove(it) }
+    logAlways "reset: clearing history, learned ET rate, and field capacity"
+    ["history", "savedEtRate", "savedEtDays", "wateredAt", "drainPeak", "settling", "settleWarned", "wateredFrom", "wateredNote", "fieldCapacity"].each { state.remove(it) }
     unschedule("announceWatering")
-    clearLearnedFc()
 
     if (resetCalibration == "Yes") {
         logAlways "reset: restoring calibration settings to defaults"
-        device.removeSetting("fieldCapacity")
         ["wateringThreshold", "tempOffset"].each {
             device.updateSetting(it, [value: DEFAULTS[it], type: "decimal"])
         }
